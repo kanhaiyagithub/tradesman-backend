@@ -1,4 +1,5 @@
 // models/SubscriptionPlan.js
+
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/db");
 
@@ -13,7 +14,7 @@ const SubscriptionPlan = sequelize.define(
 
     name: {
       type: DataTypes.STRING,
-      allowNull: false, // "Free Trial", "Pro", "Elite"
+      allowNull: false,
     },
 
     priceMonthly: {
@@ -22,9 +23,22 @@ const SubscriptionPlan = sequelize.define(
       defaultValue: 0.0,
     },
 
+    // 🔥 Stripe Product (optional but recommended)
+    stripeProductId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+
+    // 🔥 Stripe Price ID (VERY IMPORTANT)
+    stripePriceId: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      unique: true,
+    },
+
     maxSharedLocations: {
       type: DataTypes.INTEGER,
-      allowNull: true, // null = unlimited
+      allowNull: true,
     },
 
     isDefault: {

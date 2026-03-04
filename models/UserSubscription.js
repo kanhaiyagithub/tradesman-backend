@@ -23,19 +23,76 @@ const UserSubscription = sequelize.define(
       allowNull: false,
     },
 
+    // =====================
+    // 🔥 STRIPE FIELDS
+    // =====================
+
+    stripeCustomerId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+
+    stripeSubscriptionId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      unique: true, // prevent duplicates
+    },
+
+    isEarlyAccess: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+
+    hasLifetimeDiscount: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+
+    trialEndsAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+
+    // =====================
+    // 🔥 Stripe lifecycle sync
+    // =====================
+
+    status: {
+      type: DataTypes.ENUM(
+        "trialing",
+        "active",
+        "incomplete",
+        "past_due",
+        "canceled",
+        "unpaid"
+      ),
+      defaultValue: "incomplete",
+    },
+
+    currentPeriodStart: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+
+    currentPeriodEnd: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+
+    cancelAtPeriodEnd: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+
     startDate: {
       type: DataTypes.DATE,
       allowNull: false,
+      defaultValue: DataTypes.NOW,
     },
 
     endDate: {
       type: DataTypes.DATE,
       allowNull: true,
-    },
-
-    status: {
-      type: DataTypes.ENUM("active", "expired", "cancelled"),
-      defaultValue: "active",
     },
   },
   {
@@ -45,10 +102,9 @@ const UserSubscription = sequelize.define(
 );
 
 /* =======================
-   ✅ Associations (ONLY ONCE)
+   ✅ Associations
 ======================= */
 
-// user_subscriptions → users
 UserSubscription.belongsTo(User, {
   foreignKey: "userId",
   as: "user",
@@ -59,7 +115,6 @@ User.hasMany(UserSubscription, {
   as: "subscriptions",
 });
 
-// user_subscriptions → subscription_plans
 UserSubscription.belongsTo(SubscriptionPlan, {
   foreignKey: "planId",
   as: "plan",

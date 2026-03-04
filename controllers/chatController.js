@@ -1,76 +1,102 @@
 // controllers/chatController.js
+const { Op, Sequelize } = require('sequelize');
 const Message = require('../models/messageModel');
 const User = require('../models/User');
-const { Op } = require('sequelize');
 
-/**
- * Small helper to send consistent responses
- */
+/* ================= HELPERS ================= */
+
 const sendResponse = (res, statusCode, success, message, data = null, error = null) => {
+  console.log('[RESPONSE]', { statusCode, success, message });
   return res.status(statusCode).json({ success, message, data, error });
 };
 
-/**
- * Pagination helper
- */
 const parsePagination = (req, defaultLimit = 20) => {
-  let page = parseInt(req.query.page, 10) || 1;
-  let limit = parseInt(req.query.limit, 10) || defaultLimit;
-  const maxLimit = 100;
-
-  if (page < 1) page = 1;
-  if (limit < 1) limit = defaultLimit;
-  if (limit > maxLimit) limit = maxLimit;
-
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || defaultLimit, 1), 100);
   const offset = (page - 1) * limit;
+
+  console.log('[PAGINATION]', { page, limit, offset });
   return { page, limit, offset };
 };
 
 const paginatedResponse = (res, message, items, total, page, limit) => {
-  const totalPages = limit ? Math.ceil(total / limit) : 1;
+  console.log('[PAGINATED RESPONSE]', { total, page, limit });
   return sendResponse(res, 200, true, message, {
-    meta: { total, page, perPage: limit, totalPages },
-    data: items,
+    meta: {
+      total,
+      page,
+      perPage: limit,
+      totalPages: Math.ceil(total / limit)
+    },
+    data: items
   });
 };
 
+/* ================= SEND MESSAGE ================= */
+
 exports.sendMessage = async (req, res) => {
+  const t = await Message.sequelize.transaction();
   try {
     const senderId = req.user?.id;
     const { receiverId, message } = req.body;
 
-    if (!senderId)
-      return sendResponse(res, 401, false, 'Unauthorized');
+    console.log('[SEND MESSAGE]', { senderId, receiverId, message });
 
+    if (!senderId) return sendResponse(res, 401, false, 'Unauthorized');
     if (!receiverId || !message)
       return sendResponse(res, 400, false, 'receiverId and message required');
 
-    const newMsg = await Message.create({
-      senderId,
-      receiverId,
-      message,
-      isRead: false
-    });
+    const newMsg = await Message.create(
+      {
+        senderId,
+        receiverId,
+        message,
+        isRead: false
+      },
+      { transaction: t }
+    );
+
+    await t.commit();
+
+    console.log('[MESSAGE SAVED]', newMsg.id);
+
+    /* SOCKET (SAFE) */
+    try {
+      const { getIO, getOnlineUsers } = require('../socket');
+      const io = getIO();
+      const onlineUsers = getOnlineUsers();
+      const receiverSocket = onlineUsers.get(String(receiverId));
+
+      if (receiverSocket) {
+        io.to(receiverSocket).emit('receive-message', newMsg);
+        console.log('[SOCKET] emitted to', receiverSocket);
+      }
+    } catch (e) {
+      console.warn('[SOCKET ERROR]', e.message);
+    }
 
     return sendResponse(res, 201, true, 'Message sent', newMsg);
   } catch (err) {
-    console.error('sendMessage error:', err);
+    await t.rollback();
+    console.error('[SEND MESSAGE ERROR]', err);
     return sendResponse(res, 500, false, 'Server error');
   }
 };
 
+/* ================= GET CONVERSATION ================= */
+
 exports.getConversation = async (req, res) => {
   try {
-    const loggedUser = parseInt(req.user.id, 10);
-    const otherUserId = parseInt(req.params.userId, 10);
+    const loggedUser = Number(req.user?.id);
+    const otherUserId = Number(req.params.userId);
+
+    console.log('[GET CONVERSATION]', { loggedUser, otherUserId });
 
     if (!loggedUser) return sendResponse(res, 401, false, 'Unauthorized');
-
     if (!otherUserId) return sendResponse(res, 400, false, 'Invalid userId');
 
-    const { page, limit, offset } = parsePagination(req, 20);
+    const { page, limit, offset } = parsePagination(req);
 
-    // find messages between two users with pagination
     const where = {
       [Op.or]: [
         { senderId: loggedUser, receiverId: otherUserId },
@@ -78,26 +104,29 @@ exports.getConversation = async (req, res) => {
       ]
     };
 
-    const result = await Message.findAndCountAll({
+    console.log('[CONVERSATION WHERE]', where);
+
+    // 🔥 DESC for performance
+    const { rows, count } = await Message.findAndCountAll({
       where,
-      order: [['createdAt', 'ASC']], // chronological order
+      order: [['createdAt', 'DESC']],
       limit,
       offset
     });
 
-    const messages = result.rows;
+    console.log('[MESSAGES FETCHED]', { count: rows.length });
 
-    // fetch involved users info in bulk
-    const userIds = Array.from(new Set(messages.flatMap(m => [m.senderId, m.receiverId])));
+    const userIds = [...new Set(rows.flatMap(m => [m.senderId, m.receiverId]))];
+
     const users = await User.findAll({
       where: { id: userIds },
-      attributes: ['id', 'name', 'role', 'profileImage', 'email']
+      attributes: ['id', 'name', 'email', 'role', 'profileImage']
     });
-    const userMap = {};
-    users.forEach(u => (userMap[u.id] = u));
 
-    // transform messages to include helpful fields
-    const out = messages.map(m => ({
+    const userMap = Object.fromEntries(users.map(u => [u.id, u]));
+
+    // 🔥 Reverse for UI (chat order)
+    const messages = rows.reverse().map(m => ({
       id: m.id,
       senderId: m.senderId,
       receiverId: m.receiverId,
@@ -109,124 +138,102 @@ exports.getConversation = async (req, res) => {
       receiver: userMap[m.receiverId] || null
     }));
 
-    return paginatedResponse(res, 'Conversation fetched', out, result.count, page, limit);
+    return paginatedResponse(res, 'Conversation fetched', messages, count, page, limit);
   } catch (err) {
-    console.error('getConversation error:', err);
+    console.error('[GET CONVERSATION ERROR]', err);
     return sendResponse(res, 500, false, 'Server error');
   }
 };
 
-// ============================================
-// GET /api/chat/list
-// Returns list of conversations (one entry per other user) with lastMessage & unreadCount
-// Supports pagination: ?page=1&limit=20
-// ============================================
+/* ================= CHAT LIST ================= */
+
 exports.getChatList = async (req, res) => {
   try {
-    const userId = parseInt(req.user?.id, 10);
-
+    const userId = Number(req.user?.id);
     if (!userId) return sendResponse(res, 401, false, 'Unauthorized');
 
-    const { page, limit } = parsePagination(req, 20);
+    const { page, limit, offset } = parsePagination(req);
 
-    // Fetch latest messages involving user ordered by newest first.
-    // We'll dedupe by other participant while preserving recency to form conversations.
-    // Note: for very large message tables consider optimizing with a dedicated "conversations" table.
-    const messages = await Message.findAll({
+    console.log('[CHAT LIST]', { userId });
+
+    // 🔥 FIXED: camelCase columns + DESC
+    const conversations = await Message.findAll({
+      attributes: [
+        [
+          Sequelize.literal(`
+            CASE
+              WHEN "senderId" = ${userId} THEN "receiverId"
+              ELSE "senderId"
+            END
+          `),
+          'otherUserId'
+        ],
+        [Sequelize.fn('MAX', Sequelize.col('createdAt')), 'lastAt']
+      ],
       where: {
-        [Op.or]: [
-          { senderId: userId },
-          { receiverId: userId }
-        ]
+        [Op.or]: [{ senderId: userId }, { receiverId: userId }]
       },
-      order: [['createdAt', 'DESC']]
-      // no limit here because we need to dedupe by conversation; if table is large change approach
+      group: ['otherUserId'],
+      order: [[Sequelize.literal('lastAt'), 'DESC']],
+      limit,
+      offset,
+      raw: true
     });
 
-    // Build ordered unique list of other participant IDs and map messages per conversation
-    const seen = new Set();
-    const convoOrder = []; // array of otherUserId in order of latest message (desc)
-    const convoMessages = {}; // otherId => [messages (desc)]
+    console.log('[CONVERSATIONS FOUND]', conversations.length);
 
-    for (const msg of messages) {
-      const otherId = msg.senderId === userId ? msg.receiverId : msg.senderId;
-      if (!convoMessages[otherId]) convoMessages[otherId] = [];
-      convoMessages[otherId].push(msg);
+    if (!conversations.length)
+      return paginatedResponse(res, 'Chat list fetched', [], 0, page, limit);
 
-      if (!seen.has(otherId)) {
-        seen.add(otherId);
-        convoOrder.push(otherId);
-      }
-    }
+    const otherIds = conversations.map(c => c.otherUserId);
 
-    const totalConvos = convoOrder.length;
-
-    // paginate convoOrder
-    const start = (page - 1) * limit;
-    const end = start + limit;
-    const pageConvoIds = convoOrder.slice(start, end);
-
-    // Bulk fetch user info for page conversations
-    const otherUsers = await User.findAll({
-      where: { id: pageConvoIds },
-      attributes: ['id', 'name', 'email', 'role', 'profileImage']
-    });
-    const otherMap = {};
-    otherUsers.forEach(u => (otherMap[u.id] = u));
-
-    // Build chatList items
-    const chatList = pageConvoIds.map(otherId => {
-      const msgs = convoMessages[otherId] || [];
-      const lastMessage = msgs[0] || null; // we ordered messages desc earlier
-      // unread count for this conversation: messages sent by otherId to userId and isRead=false
-      const unreadCount = msgs.filter(m => m.senderId === otherId && !m.isRead).length;
-
-      return {
-        withUser: otherMap[otherId] || { id: otherId },
-        lastMessage: lastMessage
-          ? {
-              id: lastMessage.id,
-              senderId: lastMessage.senderId,
-              receiverId: lastMessage.receiverId,
-              message: lastMessage.message,
-              isRead: lastMessage.isRead,
-              createdAt: lastMessage.createdAt,
-              isMine: lastMessage.senderId === userId
-            }
-          : null,
-        unreadCount,
-        messages: msgs.map(m => ({
-          id: m.id,
-          senderId: m.senderId,
-          receiverId: m.receiverId,
-          message: m.message,
-          isRead: m.isRead,
-          createdAt: m.createdAt,
-          isMine: m.senderId === userId
-        }))
-      };
+    const users = await User.findAll({
+      where: { id: otherIds },
+      attributes: ['id', 'name', 'email', 'profileImage']
     });
 
-    return paginatedResponse(res, 'Chat list fetched', chatList, totalConvos, page, limit);
+    const userMap = Object.fromEntries(users.map(u => [u.id, u]));
+
+    const unreadCounts = await Message.findAll({
+      attributes: ['senderId', [Sequelize.fn('COUNT', '*'), 'count']],
+      where: {
+        receiverId: userId,
+        senderId: otherIds,
+        isRead: false
+      },
+      group: ['senderId'],
+      raw: true
+    });
+
+    const unreadMap = Object.fromEntries(unreadCounts.map(u => [u.senderId, u.count]));
+
+    const chatList = conversations.map(c => ({
+      withUser: userMap[c.otherUserId] || { id: c.otherUserId },
+      unreadCount: unreadMap[c.otherUserId] || 0,
+      lastAt: c.lastAt
+    }));
+
+    return paginatedResponse(res, 'Chat list fetched', chatList, chatList.length, page, limit);
   } catch (err) {
-    console.error('getChatList error:', err);
+    console.error('[CHAT LIST ERROR]', err);
     return sendResponse(res, 500, false, 'Server error');
   }
 };
 
-// ============================================
-// PUT /api/chat/mark-read
-// body: { conversationWith: <userId> }
-// ============================================
+/* ================= MARK AS READ ================= */
+
 exports.markAsRead = async (req, res) => {
   try {
-    const userId = req.user?.id;
+    const userId = Number(req.user?.id);
     const { conversationWith } = req.body;
 
-    if (!userId) return sendResponse(res, 401, false, 'Unauthorized');
-    if (!conversationWith) return sendResponse(res, 400, false, 'conversationWith is required');
+    console.log('[MARK AS READ]', { userId, conversationWith });
 
-    const [updatedCount] = await Message.update(
+    if (!userId) return sendResponse(res, 401, false, 'Unauthorized');
+    if (!conversationWith)
+      return sendResponse(res, 400, false, 'conversationWith required');
+
+    const [updated] = await Message.update(
       { isRead: true },
       {
         where: {
@@ -237,9 +244,11 @@ exports.markAsRead = async (req, res) => {
       }
     );
 
-    return sendResponse(res, 200, true, 'Messages marked as read', { updated: updatedCount });
+    console.log('[MESSAGES MARKED READ]', updated);
+
+    return sendResponse(res, 200, true, 'Messages marked as read', { updated });
   } catch (err) {
-    console.error('markAsRead error:', err);
+    console.error('[MARK AS READ ERROR]', err);
     return sendResponse(res, 500, false, 'Server error');
   }
 };

@@ -4,7 +4,6 @@ const userController = require('../controllers/userController');
 const { verifyToken } = require('../middlewares/authMiddleware');
 const { upload, convertToJpg } = require('../middlewares/uploadMiddleware');
 
-
 // Public Routes
 router.post(
   '/register',
@@ -19,24 +18,20 @@ router.post(
 
 router.post('/login', userController.login);
 
-// 🔹 Custom Get Routes (must be above /:id)
-// These endpoints support pagination via query params: ?page=1&limit=10
+// Lists
 router.get('/tradesmen', userController.getAllTradesmen);
 router.get('/clients', userController.getAllClients);
+
+// ✅ SINGLE FILTER ROUTE (FIXED)
 router.get('/tradesmen/filter', userController.filterTradesmen);
 
-
+// Profiles
 router.get('/profile/:id', userController.getFullUserProfile);
-
-// 🔹 Token based current user profile
 router.get('/me', verifyToken, userController.getMeProfile);
 
-// 🔹 Protected Route for Change Password
+// Update
 router.put('/change-password', verifyToken, userController.changePassword);
 
-// 🔹 Other CRUD routes (getAllUsers supports pagination & search)
-router.get('/', userController.getAllUsers);
-router.get('/:id', userController.getUserById);
 router.put(
   "/profile",
   verifyToken,
@@ -54,14 +49,13 @@ router.put(
   ]),
   userController.updateTradesmanProfile
 );
-router.post(
-  "/tradesmen/filter",
-  userController.filterNearbyTradesmen
-);
 
+// Users
+router.get('/', userController.getAllUsers);
+router.get('/:id', userController.getUserById);
 router.delete('/:id', verifyToken, userController.deleteUser);
 
-// 🔹 Password Reset
+// Password reset
 router.post('/forgot-password', userController.forgotPassword);
 router.post('/reset-password/:token', userController.resetPassword);
 

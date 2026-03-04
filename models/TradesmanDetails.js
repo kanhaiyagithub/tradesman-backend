@@ -6,41 +6,116 @@ const User = require("./User");
 const TradesmanDetails = sequelize.define(
   "TradesmanDetails",
   {
-    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    id: {
+      type: DataTypes.INTEGER,
+      primaryKey: true,
+      autoIncrement: true
+    },
 
     userId: {
       type: DataTypes.INTEGER,
-      references: { model: "Users", key: "id" },
       allowNull: false,
+      references: {
+        model: "Users",
+        key: "id"
+      },
+      onDelete: "CASCADE"
     },
 
-    tradeType: { type: DataTypes.STRING },
-    businessName: { type: DataTypes.STRING },
-    shortBio: { type: DataTypes.TEXT },
-    licenseNumber: { type: DataTypes.STRING },
-    licenseExpiry: { type: DataTypes.DATE },
-    licenseDocument: { type: DataTypes.STRING }, // filename
-    portfolioPhotos: { type: DataTypes.JSON },
-    portfolioDescription: { type: DataTypes.TEXT },
+    /* ================= BASIC INFO ================= */
 
-    isApproved: { type: DataTypes.BOOLEAN, defaultValue: false },
+    tradeType: {
+      type: DataTypes.STRING,
+      allowNull: false
+    },
 
-    // audit
-    approvedBy: { type: DataTypes.INTEGER, allowNull: true, comment: "admin user id who approved" },
-    approvedAt: { type: DataTypes.DATE, allowNull: true },
-    rejectionReason: { type: DataTypes.TEXT, allowNull: true }
+    businessName: {
+      type: DataTypes.STRING,
+      allowNull: true
+    },
+
+    shortBio: {
+      type: DataTypes.TEXT,
+      allowNull: true
+    },
+
+    /* ================= AVAILABILITY ================= */
+
+    startDate: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
+
+    endDate: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
+
+    /* ================= LOCATION (GPS) ================= */
+
+    currentLocation: {
+      type: DataTypes.STRING, // format: "lat,lng"
+      allowNull: true
+    },
+
+    /* ================= LICENSE & PORTFOLIO ================= */
+
+    licenseNumber: {
+      type: DataTypes.STRING,
+      allowNull: true
+    },
+
+    licenseExpiry: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
+
+    licenseDocument: {
+      type: DataTypes.STRING, // filename or path
+      allowNull: true
+    },
+
+    portfolioPhotos: {
+      type: DataTypes.JSON,
+      allowNull: true
+    },
+
+    portfolioDescription: {
+      type: DataTypes.TEXT,
+      allowNull: true
+    },
+
+    /* ================= APPROVAL ================= */
+
+    isApproved: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false
+    },
+
+    approvedBy: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      comment: "admin user id who approved"
+    },
+
+    approvedAt: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
+
+    rejectionReason: {
+      type: DataTypes.TEXT,
+      allowNull: true
+    }
   },
   {
-    timestamps: true,
     tableName: "TradesmanDetails",
+    timestamps: true
   }
 );
 
-// relations
-// User.hasOne(TradesmanDetails, { foreignKey: "userId", as: "TradesmanDetail" });
-// TradesmanDetails.belongsTo(User, { foreignKey: "userId" });
+/* ================= RELATIONS ================= */
 
-// relations
 User.hasOne(TradesmanDetails, {
   foreignKey: "userId",
   as: "TradesmanDetail"
@@ -48,8 +123,7 @@ User.hasOne(TradesmanDetails, {
 
 TradesmanDetails.belongsTo(User, {
   foreignKey: "userId",
-  as: "user" // 🔥 YE ADD KARO
+  as: "user"
 });
-
 
 module.exports = TradesmanDetails;
