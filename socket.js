@@ -10,8 +10,8 @@ module.exports = {
     io = new Server(server, {
       cors: {
         origin: "*",
-        methods: ["GET", "POST"]
-      }
+        methods: ["GET", "POST"],
+      },
     });
 
     io.on("connection", (socket) => {
@@ -22,7 +22,12 @@ module.exports = {
        * payload: { userId }
        */
       socket.on("register", ({ userId }) => {
-        if (!userId) return;
+        console.log("[REGISTER] payload:", { userId });
+
+        if (!userId) {
+          console.log("[REGISTER] userId missing");
+          return;
+        }
 
         onlineUsers.set(String(userId), socket.id);
         socket.userId = String(userId);
@@ -35,7 +40,12 @@ module.exports = {
        * payload: { roomId }
        */
       socket.on("join-room", ({ roomId }) => {
-        if (!roomId) return;
+        console.log("[JOIN-ROOM] payload:", { roomId });
+
+        if (!roomId) {
+          console.log("[JOIN-ROOM] roomId missing");
+          return;
+        }
 
         socket.join(String(roomId));
         console.log(`📥 Socket ${socket.id} joined room ${roomId}`);
@@ -46,24 +56,49 @@ module.exports = {
        * payload: { roomId, senderId, message }
        */
       socket.on("send-message", async ({ roomId, senderId, message }) => {
-        if (!roomId || !senderId || !message) return;
-
-        // 👉 1. Emit message to room
-        io.to(String(roomId)).emit("receive-message", {
+        console.log("[SEND-MESSAGE] payload:", {
           roomId,
           senderId,
           message,
-          createdAt: new Date()
         });
 
-        // 👉 2. SAVE TO MYSQL (async, non-blocking)
+        if (!roomId || !senderId || !message) {
+          console.log("[SEND-MESSAGE] validation failed", {
+            hasRoomId: !!roomId,
+            hasSenderId: !!senderId,
+            hasMessage: !!message,
+          });
+          return;
+        }
+
+        const payload = {
+          roomId,
+          senderId,
+          message,
+          createdAt: new Date(),
+        };
+
+        // emit to all users in room
+        console.log("[RECEIVE-MESSAGE] emitting to room:", String(roomId), payload);
+        io.to(String(roomId)).emit("receive-message", payload);
+
+        // save to DB
         try {
-          const db = require("./db"); // mysql2 pool
-          await db.execute(
+          console.log("[DB] loading ./config/db");
+          const db = require("./config/db");
+
+          console.log("[DB] object info:", {
+            type: typeof db,
+            hasExecute: typeof db.execute === "function",
+          });
+
+          const result = await db.execute(
             `INSERT INTO messages (room_id, sender_id, message)
              VALUES (?, ?, ?)`,
             [roomId, senderId, message]
           );
+
+          console.log("[DB] insert success:", result);
         } catch (err) {
           console.error("❌ MySQL insert failed:", err.message);
         }
@@ -76,6 +111,8 @@ module.exports = {
         if (socket.userId) {
           onlineUsers.delete(socket.userId);
           console.log("🔴 User disconnected:", socket.userId);
+        } else {
+          console.log("🔴 Socket disconnected:", socket.id);
         }
       });
     });
@@ -90,5 +127,5 @@ module.exports = {
 
   getOnlineUsers: () => {
     return onlineUsers;
-  }
+  },
 };
