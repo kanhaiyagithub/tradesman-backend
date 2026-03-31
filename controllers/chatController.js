@@ -2,6 +2,7 @@
 const { Op, Sequelize } = require('sequelize');
 const Message = require('../models/messageModel');
 const User = require('../models/User');
+const { sendPushNotification } = require('./notificationController');
 
 /* ================= HELPERS ================= */
 
@@ -73,6 +74,29 @@ exports.sendMessage = async (req, res) => {
       }
     } catch (e) {
       console.warn('[SOCKET ERROR]', e.message);
+    }
+
+    /* PUSH NOTIFICATION (to RECEIVER) */
+    try {
+      const sender = await User.findByPk(senderId, { attributes: ['name'] });
+      const senderName = sender?.name || 'Someone';
+
+      // Only send if the receiver is not actively online on this specific socket
+      // (Optional: can be added here if needed)
+
+      await sendPushNotification(
+        receiverId,
+        `New Message from ${senderName}`,
+        message.length > 60 ? `${message.substring(0, 60)}...` : message,
+        {
+          type: 'CHAT',
+          senderId: senderId,
+          click_action: 'FLUTTER_NOTIFICATION_CLICK' // Common for Flutter deep-linking
+        }
+      );
+    } catch (pushErr) {
+      console.error('[PUSH NOTIFICATION ERROR]', pushErr.message);
+      // Non-blocking: We don't fail the API call if the push fails
     }
 
     return sendResponse(res, 201, true, 'Message sent', newMsg);

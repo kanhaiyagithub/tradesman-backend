@@ -1,6 +1,7 @@
 const Hire = require("../models/hireModel");
 const User = require("../models/User");
 const { Op } = require("sequelize");
+const { sendPushNotification } = require("./notificationController");
 
 const sendResponse = (res, status, success, message, data = null) =>
   res.status(status).json({ success, message, data });
@@ -39,6 +40,15 @@ exports.requestHire = async (req, res) => {
       requestCompletion: false
     });
 
+    // 🔥 PUSH NOTIFICATION (to TRADESMAN)
+    const client = await User.findByPk(clientId, { attributes: ["name"] });
+    sendPushNotification(
+      tradesmanId,
+      "New Job Request",
+      `${client?.name || "A client"} wants to hire you for: ${jobDescription}`,
+      { hireId: hire.id, type: "NEW_HIRE" }
+    );
+
     return sendResponse(res, 201, true, "Hire request sent", hire);
   } catch (err) {
     return sendResponse(res, 500, false, err.message);
@@ -59,6 +69,15 @@ exports.respondHire = async (req, res) => {
 
     hire.status = action === "accept" ? "accepted" : "rejected";
     await hire.save();
+
+    // 🔥 PUSH NOTIFICATION (to CLIENT)
+    const tradesman = await User.findByPk(tradesmanId, { attributes: ["name"] });
+    sendPushNotification(
+      hire.clientId,
+      `Hire Request ${action === "accept" ? "Accepted" : "Rejected"}`,
+      `${tradesman?.name || "The tradesman"} has ${action}ed your hire request.`,
+      { hireId: hire.id, type: "HIRE_RESPONSE", status: hire.status }
+    );
 
     return sendResponse(res, 200, true, "Hire updated", hire);
   } catch (err) {
@@ -88,6 +107,15 @@ exports.requestJobCompletion = async (req, res) => {
 
     hire.requestCompletion = true;
     await hire.save();
+
+    // 🔥 PUSH NOTIFICATION (to CLIENT)
+    const tradesman = await User.findByPk(tradesmanId, { attributes: ["name"] });
+    sendPushNotification(
+      hire.clientId,
+      "Job Completion Requested",
+      `${tradesman?.name || "The tradesman"} has marked the job as finished and is awaiting your confirmation.`,
+      { hireId: hire.id, type: "COMPLETION_REQUESTED" }
+    );
 
     return sendResponse(res, 200, true, "Completion request sent");
   } catch (err) {
@@ -125,6 +153,15 @@ exports.confirmJobCompletion = async (req, res) => {
     hire.status = "completed";
     hire.requestCompletion = false;
     await hire.save();
+
+    // 🔥 PUSH NOTIFICATION (to TRADESMAN)
+    const client = await User.findByPk(clientId, { attributes: ["name"] });
+    sendPushNotification(
+      hire.tradesmanId,
+      "Job Completed & Confirmed",
+      `${client?.name || "The client"} has confirmed the job completion.`,
+      { hireId: hire.id, type: "JOB_COMPLETED" }
+    );
 
     return sendResponse(res, 200, true, "Job completed", hire);
   } catch (err) {

@@ -2,6 +2,7 @@ const TradesmanDetails = require('../models/TradesmanDetails');
 const User = require('../models/User');
 const transporter = require('../config/email');
 const { Op } = require('sequelize');
+const { sendPushNotification } = require('./notificationController');
 
 const send = (res, code, success, message, data = null) =>
   res.status(code).json({ success, message, data });
@@ -68,6 +69,14 @@ async function approve(req, res) {
       await user.save();
     }
 
+    // 🔥 PUSH NOTIFICATION (to USER)
+    sendPushNotification(
+      userId,
+      "Profile Approved! 🎉",
+      "Congratulations! Your tradesman profile has been approved. You can now start receiving hire requests.",
+      { type: "PROFILE_APPROVED" }
+    );
+
     return send(res, 200, true, 'Tradesman approved', { user, details });
   } catch (err) {
     console.error(err);
@@ -95,6 +104,14 @@ async function reject(req, res) {
       user.isVerified = false;
       await user.save();
     }
+
+    // 🔥 PUSH NOTIFICATION (to USER)
+    sendPushNotification(
+      userId,
+      "Profile Update",
+      `Your tradesman application was not approved. Reason: ${reason || "No reason provided."}`,
+      { type: "PROFILE_REJECTED", reason: reason || "" }
+    );
 
     return send(res, 200, true, 'Tradesman rejected', { user, details });
   } catch (err) {
