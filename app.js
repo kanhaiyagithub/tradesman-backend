@@ -25,6 +25,7 @@ const adminReportsRoutes = require('./routes/AdminRoute/adminReportsRoutes');
 const portfolioRoutes = require('./routes/portfolioRoutes');
 const tradesTypeRoutes = require("./routes/tradesTypeRoutes");
 const notificationRoutes = require('./routes/notificationRoutes');
+const clientTradeAlertRoutes = require("./routes/clientTradeAlertRoutes");
 
 const app = express();
 
@@ -76,6 +77,7 @@ app.use("/api/admin", adminReportsRoutes);
 app.use("/api/user", portfolioRoutes);
 app.use("/api/trades", tradesTypeRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use("/api/client-trade-alerts", clientTradeAlertRoutes);
 
 app.get('/', (req, res) => {
   res.send('✅ Tradesman Travel App API is running...');

@@ -1,8 +1,8 @@
-const TradesmanDetails = require('../models/TradesmanDetails');
-const User = require('../models/User');
-const transporter = require('../config/email');
-const { Op } = require('sequelize');
-const { sendPushNotification } = require('./notificationController');
+const TradesmanDetails = require("../models/TradesmanDetails");
+const User = require("../models/User");
+const transporter = require("../config/email");
+const { Op } = require("sequelize");
+const { sendPushNotification } = require("./notificationController");
 
 const send = (res, code, success, message, data = null) =>
   res.status(code).json({ success, message, data });
@@ -18,35 +18,43 @@ const parsePagination = (req) => {
 async function getPending(req, res) {
   try {
     const { page, limit, offset } = parsePagination(req);
-    const { search, tradeType } = req.query;
+    const { search, tradeType, tradeTypeId } = req.query;
 
     const whereDetail = { isApproved: false };
-    if (tradeType) whereDetail.tradeType = tradeType;
+    if (tradeTypeId) {
+      whereDetail.tradeTypeId = Number(tradeTypeId);
+    } else if (tradeType) {
+      whereDetail.tradeType = tradeType;
+    }
 
     const result = await TradesmanDetails.findAndCountAll({
       where: whereDetail,
-      include: [{
-        model: User,
-        attributes: ['id', 'name', 'email', 'mobile', 'role', 'isVerified'],
-        where: search ? {
-          [Op.or]: [
-            { name: { [Op.iLike]: `%${search}%` } },
-            { email: { [Op.iLike]: `%${search}%` } }
-          ]
-        } : undefined
-      }],
-      order: [['createdAt', 'DESC']],
+      include: [
+        {
+          model: User,
+          attributes: ["id", "name", "email", "mobile", "role", "isVerified"],
+          where: search
+            ? {
+                [Op.or]: [
+                  { name: { [Op.iLike]: `%${search}%` } },
+                  { email: { [Op.iLike]: `%${search}%` } },
+                ],
+              }
+            : undefined,
+        },
+      ],
+      order: [["createdAt", "DESC"]],
       limit,
-      offset
+      offset,
     });
 
-    return send(res, 200, true, 'Pending tradesmen fetched', {
+    return send(res, 200, true, "Pending tradesmen fetched", {
       meta: { total: result.count, page, perPage: limit },
-      data: result.rows
+      data: result.rows,
     });
   } catch (err) {
     console.error(err);
-    return send(res, 500, false, 'Server error');
+    return send(res, 500, false, "Server error");
   }
 }
 
@@ -56,7 +64,7 @@ async function approve(req, res) {
     const { userId } = req.params;
 
     const details = await TradesmanDetails.findOne({ where: { userId } });
-    if (!details) return send(res, 404, false, 'Tradesman details not found');
+    if (!details) return send(res, 404, false, "Tradesman details not found");
 
     details.isApproved = true;
     details.approvedBy = req.user.id;
@@ -64,7 +72,7 @@ async function approve(req, res) {
     await details.save();
 
     const user = await User.findByPk(userId);
-    if (user && 'isVerified' in user) {
+    if (user && "isVerified" in user) {
       user.isVerified = true;
       await user.save();
     }
@@ -74,13 +82,13 @@ async function approve(req, res) {
       userId,
       "Profile Approved! 🎉",
       "Congratulations! Your tradesman profile has been approved. You can now start receiving hire requests.",
-      { type: "PROFILE_APPROVED" }
+      { type: "PROFILE_APPROVED" },
     );
 
-    return send(res, 200, true, 'Tradesman approved', { user, details });
+    return send(res, 200, true, "Tradesman approved", { user, details });
   } catch (err) {
     console.error(err);
-    return send(res, 500, false, 'Server error');
+    return send(res, 500, false, "Server error");
   }
 }
 
@@ -91,7 +99,7 @@ async function reject(req, res) {
     const { reason } = req.body;
 
     const details = await TradesmanDetails.findOne({ where: { userId } });
-    if (!details) return send(res, 404, false, 'Tradesman details not found');
+    if (!details) return send(res, 404, false, "Tradesman details not found");
 
     details.isApproved = false;
     details.rejectionReason = reason;
@@ -100,7 +108,7 @@ async function reject(req, res) {
     await details.save();
 
     const user = await User.findByPk(userId);
-    if (user && 'isVerified' in user) {
+    if (user && "isVerified" in user) {
       user.isVerified = false;
       await user.save();
     }
@@ -110,13 +118,13 @@ async function reject(req, res) {
       userId,
       "Profile Update",
       `Your tradesman application was not approved. Reason: ${reason || "No reason provided."}`,
-      { type: "PROFILE_REJECTED", reason: reason || "" }
+      { type: "PROFILE_REJECTED", reason: reason || "" },
     );
 
-    return send(res, 200, true, 'Tradesman rejected', { user, details });
+    return send(res, 200, true, "Tradesman rejected", { user, details });
   } catch (err) {
     console.error(err);
-    return send(res, 500, false, 'Server error');
+    return send(res, 500, false, "Server error");
   }
 }
 
@@ -127,14 +135,14 @@ async function getOne(req, res) {
 
     const details = await TradesmanDetails.findOne({
       where: { userId },
-      include: [{ model: User }]
+      include: [{ model: User }],
     });
 
-    if (!details) return send(res, 404, false, 'Not found');
-    return send(res, 200, true, 'Fetched', details);
+    if (!details) return send(res, 404, false, "Not found");
+    return send(res, 200, true, "Fetched", details);
   } catch (err) {
     console.error(err);
-    return send(res, 500, false, 'Server error');
+    return send(res, 500, false, "Server error");
   }
 }
 

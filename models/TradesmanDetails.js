@@ -9,7 +9,7 @@ const TradesmanDetails = sequelize.define(
     id: {
       type: DataTypes.INTEGER,
       primaryKey: true,
-      autoIncrement: true
+      autoIncrement: true,
     },
 
     userId: {
@@ -17,113 +17,122 @@ const TradesmanDetails = sequelize.define(
       allowNull: false,
       references: {
         model: "Users",
-        key: "id"
+        key: "id",
       },
-      onDelete: "CASCADE"
+      onDelete: "CASCADE",
     },
 
     /* ================= BASIC INFO ================= */
 
     tradeType: {
       type: DataTypes.STRING,
-      allowNull: false
+      allowNull: true,
+    },
+    tradeTypeId: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
     },
 
     businessName: {
       type: DataTypes.STRING,
-      allowNull: true
+      allowNull: true,
     },
 
     shortBio: {
       type: DataTypes.TEXT,
-      allowNull: true
+      allowNull: true,
     },
 
     /* ================= AVAILABILITY ================= */
 
     startDate: {
       type: DataTypes.DATE,
-      allowNull: true
+      allowNull: true,
     },
 
     endDate: {
       type: DataTypes.DATE,
-      allowNull: true
+      allowNull: true,
     },
 
     /* ================= LOCATION (GPS) ================= */
 
     currentLocation: {
       type: DataTypes.STRING, // format: "lat,lng"
-      allowNull: true
+      allowNull: true,
     },
 
     /* ================= LICENSE & PORTFOLIO ================= */
 
     licenseNumber: {
       type: DataTypes.STRING,
-      allowNull: true
+      allowNull: true,
     },
 
     licenseExpiry: {
       type: DataTypes.DATE,
-      allowNull: true
+      allowNull: true,
     },
 
     licenseDocument: {
       type: DataTypes.STRING, // filename or path
-      allowNull: true
+      allowNull: true,
     },
 
     portfolioPhotos: {
       type: DataTypes.JSON,
-      allowNull: true
+      allowNull: true,
     },
 
     portfolioDescription: {
       type: DataTypes.TEXT,
-      allowNull: true
+      allowNull: true,
     },
 
     /* ================= APPROVAL ================= */
 
     isApproved: {
       type: DataTypes.BOOLEAN,
-      defaultValue: false
+      defaultValue: false,
     },
 
     approvedBy: {
       type: DataTypes.INTEGER,
       allowNull: true,
-      comment: "admin user id who approved"
+      comment: "admin user id who approved",
     },
 
     approvedAt: {
       type: DataTypes.DATE,
-      allowNull: true
+      allowNull: true,
     },
 
     rejectionReason: {
       type: DataTypes.TEXT,
-      allowNull: true
-    }
+      allowNull: true,
+    },
   },
   {
     tableName: "TradesmanDetails",
-    timestamps: true
-  }
+    timestamps: true,
+    indexes: [
+      { fields: ["userId"] },
+      { fields: ["tradeTypeId"] },
+      { fields: ["isApproved"] },
+    ],
+  },
 );
 
 /* ================= RELATIONS ================= */
 
 User.hasOne(TradesmanDetails, {
   foreignKey: "userId",
-  as: "TradesmanDetail"
+  as: "TradesmanDetail",
 });
 
 TradesmanDetails.belongsTo(User, {
   foreignKey: "userId",
-  as: "user"
+  as: "user",
 });
 
 module.exports = TradesmanDetails;

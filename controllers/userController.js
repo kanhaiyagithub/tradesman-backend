@@ -1,18 +1,18 @@
-const User = require('../models/User');
+const User = require("../models/User");
 const TradesmanDetails = require("../models/TradesmanDetails");
 const SubscriptionPlan = require("../models/SubscriptionPlan");
 const UserSubscription = require("../models/UserSubscription");
 const Hire = require("../models/hireModel");
 const Review = require("../models/reviewModel");
 const TravelPlan = require("../models/locationModel");
+const TradesType = require("../models/tradesTypeModel");
 
-
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 const { Op, fn, col, literal } = require("sequelize");
-const crypto = require('crypto');
-const transporter = require('../config/email');
-require('dotenv').config();
+const crypto = require("crypto");
+const transporter = require("../config/email");
+require("dotenv").config();
 
 const distanceFormula = (lat, lng) => `
   (6371 * acos(
@@ -24,7 +24,14 @@ const distanceFormula = (lat, lng) => `
   ))
 `;
 
-const sendResponse = (res, statusCode, success, message, data = null, error = null) => {
+const sendResponse = (
+  res,
+  statusCode,
+  success,
+  message,
+  data = null,
+  error = null,
+) => {
   return res.status(statusCode).json({ success, message, data, error });
 };
 
@@ -32,7 +39,7 @@ const signToken = (user) => {
   return jwt.sign(
     { id: user.id, email: user.email, role: user.role },
     process.env.JWT_SECRET,
-    { expiresIn: '7d' }
+    { expiresIn: "7d" },
   );
 };
 
@@ -78,10 +85,11 @@ exports.register = async (req, res) => {
       email,
       mobile,
       password,
-      role,              // "tradesman" | "client"
+      role, // "tradesman" | "client"
 
       // Tradesman-only text fields
       tradeType,
+      tradeTypeId,
       businessName,
       shortBio,
       licenseNumber,
@@ -102,25 +110,63 @@ exports.register = async (req, res) => {
 
     // 2) Tradesman required fields + files
     if (role === "tradesman") {
-      if (!tradeType || !businessName || !shortBio) {
-        return sendResponse(res, 400, false, "tradeType, businessName, shortBio required for tradesman");
+      if (!tradeTypeId || !businessName || !shortBio) {
+        return sendResponse(
+          res,
+          400,
+          false,
+          "tradeTypeId, businessName, shortBio required for tradesman",
+        );
       }
       if (!licenseNumber || !licenseExpiry) {
-        return sendResponse(res, 400, false, "licenseNumber & licenseExpiry required for tradesman");
+        return sendResponse(
+          res,
+          400,
+          false,
+          "licenseNumber & licenseExpiry required for tradesman",
+        );
       }
       if (!profileImageFile) {
-        return sendResponse(res, 400, false, "profileImage file is required for tradesman");
+        return sendResponse(
+          res,
+          400,
+          false,
+          "profileImage file is required for tradesman",
+        );
       }
       if (!licenseDocFile) {
-        return sendResponse(res, 400, false, "licenseDocument file is required for tradesman");
+        return sendResponse(
+          res,
+          400,
+          false,
+          "licenseDocument file is required for tradesman",
+        );
       }
       if (!portfolioFiles.length) {
-        return sendResponse(res, 400, false, "At least one portfolioPhotos file is required for tradesman");
+        return sendResponse(
+          res,
+          400,
+          false,
+          "At least one portfolioPhotos file is required for tradesman",
+        );
       }
     }
 
     // 3) Password hash
     const hashedPass = await bcrypt.hash(password, 10);
+    let resolvedTradeType = tradeType ? String(tradeType).trim() : null;
+
+    if (role === "tradesman") {
+      const tradeRecord = await TradesType.findOne({
+        where: { id: Number(tradeTypeId), isActive: true },
+      });
+
+      if (!tradeRecord) {
+        return sendResponse(res, 400, false, "Invalid tradeTypeId");
+      }
+
+      resolvedTradeType = tradeRecord.name;
+    }
 
     // 4) User create (profileImage = filename)
     const user = await User.create({
@@ -138,7 +184,8 @@ exports.register = async (req, res) => {
 
       await TradesmanDetails.create({
         userId: user.id,
-        tradeType,
+        tradeType: resolvedTradeType,
+        tradeTypeId: Number(tradeTypeId),
         businessName,
         shortBio,
         licenseNumber,
@@ -176,19 +223,23 @@ exports.login = async (req, res) => {
 
     const user = await User.findOne({ where: { email } });
     if (!user) {
-      return res.status(400).json({ success: false, message: 'Invalid email or password' });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid email or password" });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(400).json({ success: false, message: 'Invalid email or password' });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid email or password" });
     }
 
     const token = signToken(user);
 
     return res.status(200).json({
       success: true,
-      message: 'Login successful',
+      message: "Login successful",
       data: {
         token,
         user: {
@@ -196,10 +247,9 @@ exports.login = async (req, res) => {
           name: user.name,
           email: user.email,
           role: user.role,
-        }
-      }
+        },
+      },
     });
-
   } catch (error) {
     console.error("Login Error:", error);
     return sendResponse(res, 500, false, "Server error");
@@ -221,9 +271,9 @@ exports.getAllUsers = async (req, res) => {
 
     if (search) {
       where[Op.or] = [
-        { name: { [Op.iLike]: `%${search}%` } }, // For Postgres; with other DBs use Op.substring or adjust as needed
-        { email: { [Op.iLike]: `%${search}%` } },
-        { mobile: { [Op.iLike]: `%${search}%` } },
+        { name: { [Op.like]: `%${search}%` } }, // For Postgres; with other DBs use Op.substring or adjust as needed
+        { email: { [Op.like]: `%${search}%` } },
+        { mobile: { [Op.like]: `%${search}%` } },
       ];
     }
 
@@ -233,7 +283,7 @@ exports.getAllUsers = async (req, res) => {
       include: [{ model: TradesmanDetails, as: "TradesmanDetail" }],
       limit,
       offset,
-      order: [['createdAt', 'DESC']],
+      order: [["createdAt", "DESC"]],
     });
 
     return paginatedResponse(res, "Users fetched", result, page, limit);
@@ -252,22 +302,39 @@ exports.getAllUsers = async (req, res) => {
 exports.getAllTradesmen = async (req, res) => {
   try {
     const { page, limit, offset } = parsePagination(req);
-    const { tradeType, search } = req.query;
+    const { tradeTypeId, tradeType, search } = req.query;
 
     const whereUser = { role: "tradesman" };
 
-    // If search on user fields
+    // Search on user fields
     if (search) {
       whereUser[Op.or] = [
-        { name: { [Op.iLike]: `%${search}%` } },
-        { email: { [Op.iLike]: `%${search}%` } },
-        { mobile: { [Op.iLike]: `%${search}%` } },
+        { name: { [Op.like]: `%${search}%` } },
+        { email: { [Op.like]: `%${search}%` } },
+        { mobile: { [Op.like]: `%${search}%` } },
       ];
     }
 
-    // Filter on TradesmanDetails (tradeType)
+    // Filter on TradesmanDetails
     const tradesmanWhere = {};
-    if (tradeType) tradesmanWhere.tradeType = tradeType;
+
+    if (
+      tradeTypeId !== undefined &&
+      tradeTypeId !== null &&
+      tradeTypeId !== ""
+    ) {
+      if (Number.isNaN(Number(tradeTypeId))) {
+        return sendResponse(
+          res,
+          400,
+          false,
+          "tradeTypeId must be a valid number",
+        );
+      }
+      tradesmanWhere.tradeTypeId = Number(tradeTypeId);
+    } else if (tradeType) {
+      tradesmanWhere.tradeType = tradeType;
+    }
 
     const result = await User.findAndCountAll({
       where: whereUser,
@@ -275,20 +342,42 @@ exports.getAllTradesmen = async (req, res) => {
         {
           model: TradesmanDetails,
           as: "TradesmanDetail",
-          where: Object.keys(tradesmanWhere).length ? tradesmanWhere : undefined,
+          where:
+            Object.keys(tradesmanWhere).length > 0 ? tradesmanWhere : undefined,
           required: false,
         },
       ],
       limit,
       offset,
-      order: [['createdAt', 'DESC']],
+      order: [["createdAt", "DESC"]],
     });
 
     if (!result || result.count === 0) {
       return sendResponse(res, 404, false, "No tradesmen found");
     }
 
-    return paginatedResponse(res, "Tradesmen fetched", result, page, limit);
+    // add both tradeTypeId and tradeType clearly in response
+    const formattedRows = result.rows.map((user) => {
+      const userJson = user.toJSON();
+
+      return {
+        ...userJson,
+        tradeTypeId: userJson.TradesmanDetail?.tradeTypeId || null,
+        tradeType: userJson.TradesmanDetail?.tradeType || null,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Tradesmen fetched",
+      data: formattedRows,
+      pagination: {
+        total: result.count,
+        page,
+        limit,
+        totalPages: Math.ceil(result.count / limit),
+      },
+    });
   } catch (error) {
     console.error("Fetch Tradesmen Error:", error);
     return sendResponse(res, 500, false, "Server error");
@@ -309,9 +398,9 @@ exports.getAllClients = async (req, res) => {
 
     if (search) {
       where[Op.or] = [
-        { name: { [Op.iLike]: `%${search}%` } },
-        { email: { [Op.iLike]: `%${search}%` } },
-        { mobile: { [Op.iLike]: `%${search}%` } },
+        { name: { [Op.like]: `%${search}%` } },
+        { email: { [Op.like]: `%${search}%` } },
+        { mobile: { [Op.like]: `%${search}%` } },
       ];
     }
 
@@ -319,7 +408,7 @@ exports.getAllClients = async (req, res) => {
       where,
       limit,
       offset,
-      order: [['createdAt', 'DESC']],
+      order: [["createdAt", "DESC"]],
     });
 
     if (!result || result.count === 0) {
@@ -342,7 +431,13 @@ exports.getUserById = async (req, res) => {
 
     if (!user) return sendResponse(res, 404, false, "User not found");
 
-    return sendResponse(res, 200, true, "User fetched", user);
+    const userJson = user.toJSON();
+
+    return sendResponse(res, 200, true, "User fetched", {
+      ...userJson,
+      tradeTypeId: userJson.TradesmanDetail?.tradeTypeId || null,
+      tradeType: userJson.TradesmanDetail?.tradeType || null,
+    });
   } catch (error) {
     console.error("Fetch User Error:", error);
     return sendResponse(res, 500, false, "Server error");
@@ -354,8 +449,7 @@ exports.updateProfile = async (req, res) => {
     const userId = req.user.id; // 🔥 TOKEN SE ID
 
     const user = await User.findByPk(userId);
-    if (!user)
-      return sendResponse(res, 404, false, "User not found");
+    if (!user) return sendResponse(res, 404, false, "User not found");
 
     const {
       name,
@@ -363,11 +457,12 @@ exports.updateProfile = async (req, res) => {
       mobile,
       password,
       tradeType,
+      tradeTypeId,
       businessName,
       shortBio,
       licenseNumber,
       licenseExpiry,
-      isApproved
+      isApproved,
     } = req.body;
 
     // -------- USERS TABLE (OPTIONAL FIELDS) --------
@@ -388,11 +483,24 @@ exports.updateProfile = async (req, res) => {
 
     // -------- TRADESMAN DETAILS (IF EXISTS) --------
     const tradesman = await TradesmanDetails.findOne({
-      where: { userId }
+      where: { userId },
     });
 
     if (tradesman) {
-      if (tradeType !== undefined) tradesman.tradeType = tradeType;
+      if (tradeTypeId !== undefined) {
+        const tradeRecord = await TradesType.findOne({
+          where: { id: Number(tradeTypeId), isActive: true },
+        });
+
+        if (!tradeRecord) {
+          return sendResponse(res, 400, false, "Invalid tradeTypeId");
+        }
+
+        tradesman.tradeTypeId = Number(tradeTypeId);
+        tradesman.tradeType = tradeRecord.name;
+      } else if (tradeType !== undefined) {
+        tradesman.tradeType = tradeType;
+      }
       if (businessName !== undefined) tradesman.businessName = businessName;
       if (shortBio !== undefined) tradesman.shortBio = shortBio;
       if (licenseNumber !== undefined) tradesman.licenseNumber = licenseNumber;
@@ -407,9 +515,19 @@ exports.updateProfile = async (req, res) => {
       name: user.name,
       email: user.email,
       mobile: user.mobile,
-      profileImage: user.profileImage
+      profileImage: user.profileImage,
+      tradesman: tradesman
+        ? {
+            tradeTypeId: tradesman.tradeTypeId,
+            tradeType: tradesman.tradeType,
+            businessName: tradesman.businessName,
+            shortBio: tradesman.shortBio,
+            licenseNumber: tradesman.licenseNumber,
+            licenseExpiry: tradesman.licenseExpiry,
+            isApproved: tradesman.isApproved,
+          }
+        : null,
     });
-
   } catch (error) {
     console.error("Update Profile Error:", error);
     return sendResponse(res, 500, false, "Server error");
@@ -424,7 +542,6 @@ exports.deleteUser = async (req, res) => {
 
     await user.destroy();
     return sendResponse(res, 200, true, "User deleted successfully");
-
   } catch (error) {
     console.error("Delete Error:", error);
     return sendResponse(res, 500, false, "Server error");
@@ -453,7 +570,6 @@ exports.forgotPassword = async (req, res) => {
     console.log("Reset Link:", resetLink);
 
     return sendResponse(res, 200, true, "Password reset link sent", resetLink);
-
   } catch (err) {
     console.error("Forgot Error:", err);
     return sendResponse(res, 500, false, "Server error");
@@ -483,7 +599,6 @@ exports.resetPassword = async (req, res) => {
     });
 
     return sendResponse(res, 200, true, "Password reset successful");
-
   } catch (error) {
     console.error("Reset Error:", error);
     return sendResponse(res, 500, false, "Server error");
@@ -504,13 +619,13 @@ exports.changePassword = async (req, res) => {
     const user = await User.findByPk(userId);
 
     const isMatch = await bcrypt.compare(oldPassword, user.password);
-    if (!isMatch) return sendResponse(res, 400, false, "Old password incorrect");
+    if (!isMatch)
+      return sendResponse(res, 400, false, "Old password incorrect");
 
     user.password = await bcrypt.hash(newPassword, 10);
     await user.save();
 
     return sendResponse(res, 200, true, "Password changed successfully");
-
   } catch (error) {
     console.error("Change Password Error:", error);
     return sendResponse(res, 500, false, "Server error");
@@ -528,9 +643,13 @@ exports.getMeProfile = async (req, res) => {
       return sendResponse(res, 404, false, "User not found");
     }
 
-    // 🔥 RAW SEQUELIZE OBJECT RETURN
-    return sendResponse(res, 200, true, "User fetched", user);
+    const userJson = user.toJSON();
 
+    return sendResponse(res, 200, true, "User fetched", {
+      ...userJson,
+      tradeTypeId: userJson.TradesmanDetail?.tradeTypeId || null,
+      tradeType: userJson.TradesmanDetail?.tradeType || null,
+    });
   } catch (error) {
     console.error(error);
     return sendResponse(res, 500, false, "Server error");
@@ -548,7 +667,7 @@ exports.getFullUserProfile = async (req, res) => {
         {
           model: TradesmanDetails,
           as: "TradesmanDetail",
-          attributes: ["tradeType", "businessName", "shortBio"],
+          attributes: ["tradeTypeId", "tradeType", "businessName", "shortBio"],
         },
         {
           model: TravelPlan,
@@ -601,8 +720,8 @@ exports.getFullUserProfile = async (req, res) => {
     const avgRating =
       reviews.length > 0
         ? (
-          reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length
-        ).toFixed(1)
+            reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length
+          ).toFixed(1)
         : "0.0";
 
     /* ================= ACTIVE TRAVEL PLAN ================= */
@@ -617,6 +736,7 @@ exports.getFullUserProfile = async (req, res) => {
         id: user.id,
         name: user.name,
         profileImage: user.profileImage,
+        tradeTypeId: user.TradesmanDetail?.tradeTypeId || null,
         tradeType: user.TradesmanDetail?.tradeType || null,
         description: user.TradesmanDetail?.shortBio || null,
 
@@ -630,13 +750,13 @@ exports.getFullUserProfile = async (req, res) => {
         /* LOCATION / TRAVEL */
         travelPlan: activePlan
           ? {
-            currentLocation: activePlan.currentLocation,
-            startLocation: activePlan.startLocation,
-            destination: activePlan.destination,
-            priceRange: activePlan.priceRange,
-            startDate: activePlan.startDate,
-            endDate: activePlan.endDate,
-          }
+              currentLocation: activePlan.currentLocation,
+              startLocation: activePlan.startLocation,
+              destination: activePlan.destination,
+              priceRange: activePlan.priceRange,
+              startDate: activePlan.startDate,
+              endDate: activePlan.endDate,
+            }
           : null,
 
         /* JOB HISTORY (UI LIST) */
@@ -653,22 +773,188 @@ exports.getFullUserProfile = async (req, res) => {
   }
 };
 
+// exports.filterTradesmen = async (req, res) => {
+//   try {
+//     console.log("🔥 NEW FILTER CONTROLLER HIT 🔥");
+//     console.log("🔍 Incoming filter query:", req.query);
+
+//     const {
+//       tradeTypeId,
+//       tradeType,
+//       lat,
+//       lng,
+//       radius = 40,
+//       rating,
+//       verified,
+//       availability,
+//     } = req.query;
+
+//     /* ================= BASIC SETUP ================= */
+
+//     const userLat = lat ? Number(lat) : null;
+//     const userLng = lng ? Number(lng) : null;
+//     const maxRadius = Number(radius);
+
+//     let whereUser = { role: "tradesman" };
+//     let whereTrade = {};
+
+//     /* ================= 1️⃣ TRADE TYPE FILTER ================= */
+
+//     if (
+//       tradeTypeId !== undefined &&
+//       tradeTypeId !== null &&
+//       tradeTypeId !== ""
+//     ) {
+//       if (Number.isNaN(Number(tradeTypeId))) {
+//         return sendResponse(
+//           res,
+//           400,
+//           false,
+//           "tradeTypeId must be a valid number",
+//         );
+//       }
+//       tradesmanWhere.tradeTypeId = Number(tradeTypeId);
+//     } else if (tradeType) {
+//       tradesmanWhere.tradeType = tradeType;
+//     }
+
+//     /* ================= 2️⃣ VERIFIED FILTER ================= */
+
+//     if (verified === "true") {
+//       whereTrade.isApproved = true;
+//       console.log("✅ Verified tradesmen only");
+//     }
+
+//     /* ================= 3️⃣ AVAILABILITY FILTER ================= */
+
+//     if (availability === "today") {
+//       const now = new Date();
+//       whereTrade.startDate = { [Op.lte]: now };
+//       whereTrade.endDate = { [Op.gte]: now };
+//       console.log("✅ Availability: today");
+//     }
+
+//     /* ================= 4️⃣ FETCH TRADESMEN ================= */
+
+//     let tradesmen = await User.findAll({
+//       where: whereUser,
+//       include: [
+//         {
+//           model: TradesmanDetails,
+//           as: "tradesmanDetails",
+//           where: tradesmanWhere,
+//           required: true,
+//         },
+//       ],
+//     });
+
+//     console.log(`📦 Tradesmen fetched from DB: ${tradesmen.length}`);
+
+//     if (!tradesmen.length) {
+//       return res.json({
+//         success: true,
+//         message: "No tradesmen found",
+//         data: [],
+//       });
+//     }
+
+//     /* ================= 5️⃣ RATING FILTER (NO N+1) ================= */
+
+//     if (rating) {
+//       console.log(`⭐ Applying rating filter >= ${rating}`);
+
+//       const ratings = await Review.findAll({
+//         attributes: ["toUserId", [fn("AVG", col("rating")), "avgRating"]],
+//         where: {
+//           toUserId: tradesmen.map((t) => t.id),
+//         },
+//         group: ["toUserId"],
+//         raw: true,
+//       });
+
+//       const ratingMap = Object.fromEntries(
+//         ratings.map((r) => [r.toUserId, Number(r.avgRating)]),
+//       );
+
+//       tradesmen = tradesmen.filter((t) => {
+//         const avg = ratingMap[t.id] || 0;
+//         t.dataValues.avgRating = avg;
+//         return avg >= Number(rating);
+//       });
+
+//       console.log(`⭐ After rating filter: ${tradesmen.length}`);
+//     }
+
+//     /* ================= 6️⃣ GPS DISTANCE FILTER ================= */
+
+//     if (userLat !== null && userLng !== null) {
+//       console.log("📍 Applying GPS filter", {
+//         userLat,
+//         userLng,
+//         maxRadius,
+//       });
+
+//       const R = 6371; // Earth radius in km
+
+//       tradesmen = tradesmen.filter((t) => {
+//         const location = t.TradesmanDetail.currentLocation;
+//         if (!location) return false;
+
+//         const [tLat, tLng] = location.split(",").map(Number);
+//         if (!tLat || !tLng) return false;
+
+//         const dLat = ((tLat - userLat) * Math.PI) / 180;
+//         const dLng = ((tLng - userLng) * Math.PI) / 180;
+
+//         const a =
+//           Math.sin(dLat / 2) ** 2 +
+//           Math.cos((userLat * Math.PI) / 180) *
+//             Math.cos((tLat * Math.PI) / 180) *
+//             Math.sin(dLng / 2) ** 2;
+
+//         const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+//         const distance = R * c;
+
+//         t.dataValues.distance = Number(distance.toFixed(2));
+
+//         return distance <= maxRadius;
+//       });
+
+//       console.log(`📍 After GPS filter: ${tradesmen.length}`);
+//     }
+
+//     /* ================= FINAL RESPONSE ================= */
+
+//     return res.json({
+//       success: true,
+//       message: "Filtered tradesmen",
+//       count: tradesmen.length,
+//       data: tradesmen,
+//     });
+//   } catch (err) {
+//     console.error("❌ Filter Error:", err);
+//     return res.status(500).json({
+//       success: false,
+//       message: "Server error",
+//     });
+//   }
+// };
+
 exports.filterTradesmen = async (req, res) => {
   try {
     console.log("🔥 NEW FILTER CONTROLLER HIT 🔥");
     console.log("🔍 Incoming filter query:", req.query);
 
     const {
+      tradeTypeId,
       tradeType,
       lat,
       lng,
       radius = 40,
       rating,
       verified,
-      availability
+      availability,
     } = req.query;
-
-    /* ================= BASIC SETUP ================= */
 
     const userLat = lat ? Number(lat) : null;
     const userLng = lng ? Number(lng) : null;
@@ -679,10 +965,23 @@ exports.filterTradesmen = async (req, res) => {
 
     /* ================= 1️⃣ TRADE TYPE FILTER ================= */
 
-    if (tradeType) {
-      const trades = tradeType.split(",").map(t => t.trim());
-      whereTrade.tradeType = { [Op.in]: trades };
-      console.log("✅ Trade types:", trades);
+    if (
+      tradeTypeId !== undefined &&
+      tradeTypeId !== null &&
+      tradeTypeId !== ""
+    ) {
+      if (Number.isNaN(Number(tradeTypeId))) {
+        return sendResponse(
+          res,
+          400,
+          false,
+          "tradeTypeId must be a valid number",
+        );
+      }
+
+      whereTrade.tradeTypeId = Number(tradeTypeId);
+    } else if (tradeType) {
+      whereTrade.tradeType = tradeType;
     }
 
     /* ================= 2️⃣ VERIFIED FILTER ================= */
@@ -693,12 +992,13 @@ exports.filterTradesmen = async (req, res) => {
     }
 
     /* ================= 3️⃣ AVAILABILITY FILTER ================= */
-
+    // NOTE:
+    // availability filter should ideally use TravelPlan table, not TradesmanDetails.
+    // Keeping log only for now so this function doesn't break on wrong columns.
     if (availability === "today") {
-      const now = new Date();
-      whereTrade.startDate = { [Op.lte]: now };
-      whereTrade.endDate = { [Op.gte]: now };
-      console.log("✅ Availability: today");
+      console.log(
+        "⚠️ availability=today received, but availability should be checked from TravelPlan",
+      );
     }
 
     /* ================= 4️⃣ FETCH TRADESMEN ================= */
@@ -710,9 +1010,9 @@ exports.filterTradesmen = async (req, res) => {
           model: TradesmanDetails,
           as: "TradesmanDetail",
           where: whereTrade,
-          required: true // IMPORTANT
-        }
-      ]
+          required: true,
+        },
+      ],
     });
 
     console.log(`📦 Tradesmen fetched from DB: ${tradesmen.length}`);
@@ -721,32 +1021,29 @@ exports.filterTradesmen = async (req, res) => {
       return res.json({
         success: true,
         message: "No tradesmen found",
-        data: []
+        data: [],
       });
     }
 
-    /* ================= 5️⃣ RATING FILTER (NO N+1) ================= */
+    /* ================= 5️⃣ RATING FILTER ================= */
 
     if (rating) {
       console.log(`⭐ Applying rating filter >= ${rating}`);
 
       const ratings = await Review.findAll({
-        attributes: [
-          "toUserId",
-          [fn("AVG", col("rating")), "avgRating"]
-        ],
+        attributes: ["toUserId", [fn("AVG", col("rating")), "avgRating"]],
         where: {
-          toUserId: tradesmen.map(t => t.id)
+          toUserId: tradesmen.map((t) => t.id),
         },
         group: ["toUserId"],
-        raw: true
+        raw: true,
       });
 
       const ratingMap = Object.fromEntries(
-        ratings.map(r => [r.toUserId, Number(r.avgRating)])
+        ratings.map((r) => [r.toUserId, Number(r.avgRating)]),
       );
 
-      tradesmen = tradesmen.filter(t => {
+      tradesmen = tradesmen.filter((t) => {
         const avg = ratingMap[t.id] || 0;
         t.dataValues.avgRating = avg;
         return avg >= Number(rating);
@@ -761,26 +1058,26 @@ exports.filterTradesmen = async (req, res) => {
       console.log("📍 Applying GPS filter", {
         userLat,
         userLng,
-        maxRadius
+        maxRadius,
       });
 
-      const R = 6371; // Earth radius in km
+      const R = 6371;
 
-      tradesmen = tradesmen.filter(t => {
-        const location = t.TradesmanDetail.currentLocation;
+      tradesmen = tradesmen.filter((t) => {
+        const location = t.TradesmanDetail?.currentLocation;
         if (!location) return false;
 
         const [tLat, tLng] = location.split(",").map(Number);
-        if (!tLat || !tLng) return false;
+        if (Number.isNaN(tLat) || Number.isNaN(tLng)) return false;
 
-        const dLat = (tLat - userLat) * Math.PI / 180;
-        const dLng = (tLng - userLng) * Math.PI / 180;
+        const dLat = ((tLat - userLat) * Math.PI) / 180;
+        const dLng = ((tLng - userLng) * Math.PI) / 180;
 
         const a =
           Math.sin(dLat / 2) ** 2 +
-          Math.cos(userLat * Math.PI / 180) *
-          Math.cos(tLat * Math.PI / 180) *
-          Math.sin(dLng / 2) ** 2;
+          Math.cos((userLat * Math.PI) / 180) *
+            Math.cos((tLat * Math.PI) / 180) *
+            Math.sin(dLng / 2) ** 2;
 
         const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         const distance = R * c;
@@ -795,18 +1092,25 @@ exports.filterTradesmen = async (req, res) => {
 
     /* ================= FINAL RESPONSE ================= */
 
+    const formattedTradesmen = tradesmen.map((t) => ({
+      ...t.toJSON(),
+      tradeTypeId: t.TradesmanDetail?.tradeTypeId || null,
+      tradeType: t.TradesmanDetail?.tradeType || null,
+      distance: t.dataValues.distance || null,
+      avgRating: t.dataValues.avgRating || 0,
+    }));
+
     return res.json({
       success: true,
       message: "Filtered tradesmen",
-      count: tradesmen.length,
-      data: tradesmen
+      count: formattedTradesmen.length,
+      data: formattedTradesmen,
     });
-
   } catch (err) {
     console.error("❌ Filter Error:", err);
     return res.status(500).json({
       success: false,
-      message: "Server error"
+      message: "Server error",
     });
   }
 };
@@ -835,6 +1139,7 @@ exports.updateTradesmanProfile = async (req, res) => {
       name,
       mobile,
       tradeType,
+      tradeTypeId,
       businessName,
       shortBio,
       licenseNumber,
@@ -858,7 +1163,20 @@ exports.updateTradesmanProfile = async (req, res) => {
     await user.save();
 
     /* ================= UPDATE TRADESMAN DETAILS ================= */
-    if (tradeType !== undefined) tradesman.tradeType = tradeType;
+    if (tradeTypeId !== undefined) {
+      const tradeRecord = await TradesType.findOne({
+        where: { id: Number(tradeTypeId), isActive: true },
+      });
+
+      if (!tradeRecord) {
+        return sendResponse(res, 400, false, "Invalid tradeTypeId");
+      }
+
+      tradesman.tradeTypeId = Number(tradeTypeId);
+      tradesman.tradeType = tradeRecord.name;
+    } else if (tradeType !== undefined) {
+      tradesman.tradeType = tradeType;
+    }
     if (businessName !== undefined) tradesman.businessName = businessName;
     if (shortBio !== undefined) tradesman.shortBio = shortBio;
     if (licenseNumber !== undefined) tradesman.licenseNumber = licenseNumber;
@@ -871,9 +1189,7 @@ exports.updateTradesmanProfile = async (req, res) => {
 
     // ✅ PORTFOLIO PHOTOS → ONLY filenames, NO stringify
     if (portfolioFiles.length > 0) {
-      tradesman.portfolioPhotos = portfolioFiles.map(
-        (f) => f.filename
-      );
+      tradesman.portfolioPhotos = portfolioFiles.map((f) => f.filename);
     }
 
     await tradesman.save();
@@ -887,6 +1203,7 @@ exports.updateTradesmanProfile = async (req, res) => {
         profileImage: user.profileImage, // e.g. "profileImage-176562030141.jpg"
       },
       tradesman: {
+        tradeTypeId: tradesman.tradeTypeId,
         tradeType: tradesman.tradeType,
         businessName: tradesman.businessName,
         shortBio: tradesman.shortBio,
@@ -896,7 +1213,6 @@ exports.updateTradesmanProfile = async (req, res) => {
         portfolioPhotos: tradesman.portfolioPhotos || [], // ["img1.jpg","img2.jpg"]
       },
     });
-
   } catch (error) {
     console.error("Update Tradesman Profile Error:", error);
     return sendResponse(res, 500, false, "Server error");
@@ -908,30 +1224,68 @@ exports.filterNearbyTradesmen = async (req, res) => {
     const {
       latitude,
       longitude,
-      radius = 40,        // km
+      radius = 40, // km
+      tradeTypeId,
       tradeType,
       minRating = 0,
       onlyVerified = true,
-      availability = "open"
+      availability = "open",
     } = req.body;
 
-    if (!latitude || !longitude) {
+    if (
+      latitude === undefined ||
+      latitude === null ||
+      longitude === undefined ||
+      longitude === null
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Latitude & longitude required"
+        message: "Latitude & longitude required",
       });
     }
 
-    // 🔥 distance formula (repeatable)
+    if (Number.isNaN(Number(latitude)) || Number.isNaN(Number(longitude))) {
+      return res.status(400).json({
+        success: false,
+        message: "Latitude and longitude must be valid numbers",
+      });
+    }
+
+    if (
+      tradeTypeId !== undefined &&
+      tradeTypeId !== null &&
+      tradeTypeId !== "" &&
+      Number.isNaN(Number(tradeTypeId))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "tradeTypeId must be a valid number",
+      });
+    }
+
     const distanceSQL = `
       (6371 * acos(
-        cos(radians(${latitude})) *
+        cos(radians(${Number(latitude)})) *
         cos(radians(travelPlans.latitude)) *
-        cos(radians(travelPlans.longitude) - radians(${longitude})) +
-        sin(radians(${latitude})) *
+        cos(radians(travelPlans.longitude) - radians(${Number(longitude)})) +
+        sin(radians(${Number(latitude)})) *
         sin(radians(travelPlans.latitude))
       ))
     `;
+
+    const tradesmanWhere = {
+      ...(onlyVerified && { isApproved: true }),
+    };
+
+    if (
+      tradeTypeId !== undefined &&
+      tradeTypeId !== null &&
+      tradeTypeId !== ""
+    ) {
+      tradesmanWhere.tradeTypeId = Number(tradeTypeId);
+    } else if (tradeType) {
+      tradesmanWhere.tradeType = tradeType;
+    }
 
     const tradesmen = await User.findAll({
       where: { role: "tradesman" },
@@ -942,10 +1296,7 @@ exports.filterNearbyTradesmen = async (req, res) => {
           model: TradesmanDetails,
           as: "TradesmanDetail",
           required: true,
-          where: {
-            ...(tradeType && { tradeType }),
-            ...(onlyVerified && { isApproved: true })
-          }
+          where: tradesmanWhere,
         },
         {
           model: TravelPlan,
@@ -954,68 +1305,58 @@ exports.filterNearbyTradesmen = async (req, res) => {
           where: {
             status: availability,
             latitude: { [Op.ne]: null },
-            longitude: { [Op.ne]: null }
+            longitude: { [Op.ne]: null },
           },
           attributes: {
-            include: [[literal(distanceSQL), "distance"]]
-          }
-        }
+            include: [[literal(distanceSQL), "distance"]],
+          },
+        },
       ],
 
-      // ✅ FIXED
-      having: literal(`${distanceSQL} <= ${radius}`),
-      order: [[literal(distanceSQL), "ASC"]]
+      having: literal(`${distanceSQL} <= ${Number(radius)}`),
+      order: [[literal(distanceSQL), "ASC"]],
     });
 
-    // ⭐ Rating filter (post-processing)
     const result = await Promise.all(
       tradesmen.map(async (t) => {
         const ratingAgg = await Review.findOne({
           where: { toUserId: t.id },
           attributes: [
             [fn("AVG", col("rating")), "avgRating"],
-            [fn("COUNT", col("id")), "reviewCount"]
+            [fn("COUNT", col("id")), "reviewCount"],
           ],
-          raw: true
+          raw: true,
         });
 
-        const rating = ratingAgg?.avgRating
-          ? Number(ratingAgg.avgRating)
-          : 0;
+        const rating = ratingAgg?.avgRating ? Number(ratingAgg.avgRating) : 0;
 
-        if (rating < minRating) return null;
+        if (rating < Number(minRating)) return null;
 
         return {
           id: t.id,
           name: t.name,
           profileImage: t.profileImage,
-          tradeType: t.TradesmanDetail.tradeType,
-          businessName: t.TradesmanDetail.businessName,
+          tradeTypeId: t.TradesmanDetail?.tradeTypeId || null,
+          tradeType: t.TradesmanDetail?.tradeType || null,
+          businessName: t.TradesmanDetail?.businessName || null,
           rating: rating.toFixed(1),
           reviewCount: ratingAgg?.reviewCount || 0,
-          distance: Number(
-            t.travelPlans[0].get("distance")
-          ).toFixed(2),
-          availability: "Available"
+          distance: Number(t.travelPlans[0].get("distance")).toFixed(2),
+          availability: "Available",
         };
-      })
+      }),
     );
 
     return res.json({
       success: true,
       message: "Filtered tradesmen fetched",
-      data: result.filter(Boolean)
+      data: result.filter(Boolean),
     });
-
   } catch (err) {
     console.error("Filter error:", err);
     return res.status(500).json({
       success: false,
-      message: "Server error"
+      message: "Server error",
     });
   }
 };
-
-
-
-

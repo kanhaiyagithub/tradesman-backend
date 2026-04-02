@@ -22,13 +22,11 @@ const TravelPlan = sequelize.define(
       allowNull: true,
     },
 
-    // ✅ NEW
     latitude: {
       type: DataTypes.DOUBLE,
       allowNull: true,
     },
 
-    // ✅ NEW
     longitude: {
       type: DataTypes.DOUBLE,
       allowNull: true,
@@ -39,8 +37,29 @@ const TravelPlan = sequelize.define(
       allowNull: false,
     },
 
+    // ✅ ONLY datetime
+    startDateTime: {
+      type: DataTypes.DATE,
+      allowNull: false,
+    },
+
     destination: {
       type: DataTypes.STRING,
+      allowNull: false,
+    },
+
+    destinationLatitude: {
+      type: DataTypes.DOUBLE,
+      allowNull: false,
+    },
+
+    destinationLongitude: {
+      type: DataTypes.DOUBLE,
+      allowNull: false,
+    },
+
+    destinationDateTime: {
+      type: DataTypes.DATE,
       allowNull: false,
     },
 
@@ -57,16 +76,7 @@ const TravelPlan = sequelize.define(
     stops: {
       type: DataTypes.JSON,
       allowNull: true,
-    },
-
-    startDate: {
-      type: DataTypes.DATE,
-      allowNull: true,
-    },
-
-    endDate: {
-      type: DataTypes.DATE,
-      allowNull: true,
+      comment: "Each stop: { name, latitude, longitude, expectedDateTime }",
     },
 
     status: {
