@@ -1,5 +1,8 @@
 const admin = require("../utils/firebase");
-const { getTokensByUser, saveDeviceToken } = require("../models/deviceTokenModel");
+const {
+  getTokensByUser,
+  saveDeviceToken,
+} = require("../models/deviceTokenModel");
 
 const sendPushNotification = async (userId, title, body, data = {}) => {
   try {
@@ -17,7 +20,7 @@ const sendPushNotification = async (userId, title, body, data = {}) => {
       userId,
       tokenCount: tokens ? tokens.length : 0,
       tokensPreview: (tokens || []).map((t) =>
-        t.token ? `${t.token.substring(0, 15)}...` : null
+        t.token ? `${t.token.substring(0, 15)}...` : null,
       ),
     });
 
@@ -62,60 +65,71 @@ const sendPushNotification = async (userId, title, body, data = {}) => {
       stringData[key] = String(data[key] ?? "");
     });
 
-    const message = {
-      notification: {
-        title,
-        body,
-      },
-      data: stringData,
-      tokens: registrationTokens,
-    };
+    let successCount = 0;
+    let failureCount = 0;
 
-    console.log("[PUSH] Sending to Firebase", {
-      userId,
-      tokenCount: registrationTokens.length,
-      payload: {
-        title,
-        body,
-        data: stringData,
-      },
-      at: new Date().toISOString(),
-    });
+    for (const deviceToken of registrationTokens) {
+      try {
+        const message = {
+          token: deviceToken,
 
-    const response = await admin.messaging().sendEachForMulticast(message);
+          notification: {
+            title,
+            body,
+          },
 
-    console.log("[PUSH] Firebase response", {
-      userId,
-      successCount: response.successCount,
-      failureCount: response.failureCount,
-    });
+          data: {
+            ...stringData,
+            click_action: "FLUTTER_NOTIFICATION_CLICK",
+          },
 
-    // 🔍 Log each token result
-    response.responses.forEach((resp, index) => {
-      const tokenPreview = `${registrationTokens[index].substring(0, 15)}...`;
+          android: {
+            priority: "high",
+            notification: {
+              channelId: "high_importance_channel",
+            },
+          },
 
-      if (resp.success) {
+          apns: {
+            headers: {
+              "apns-priority": "10",
+            },
+            payload: {
+              aps: {
+                sound: "default",
+              },
+            },
+          },
+        };
+
+        const response = await admin.messaging().send(message);
+
+        successCount++;
+
         console.log("[PUSH SUCCESS]", {
           userId,
-          token: tokenPreview,
-          messageId: resp.messageId,
+          token: deviceToken.substring(0, 15) + "...",
+          messageId: response,
         });
-      } else {
+      } catch (err) {
+        failureCount++;
+
         console.error("[PUSH FAILURE]", {
           userId,
-          token: tokenPreview,
-          error: resp.error?.message,
-          code: resp.error?.code,
+          token: deviceToken.substring(0, 15) + "...",
+          error: err.message,
+          code: err.code,
         });
       }
-    });
+    }
 
     return {
-      success: response.successCount > 0,
-      reason: response.successCount > 0 ? null : "ALL_PUSHES_FAILED",
-      sentCount: response.successCount,
-      failureCount: response.failureCount,
+      success: successCount > 0,
+      reason: successCount > 0 ? null : "ALL_PUSHES_FAILED",
+      sentCount: successCount,
+      failureCount,
     };
+
   } catch (error) {
     console.error("[PUSH ERROR] Push crashed", {
       userId,
