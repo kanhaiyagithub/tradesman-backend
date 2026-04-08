@@ -1,7 +1,5 @@
 const User = require("../models/User");
 const TradesmanDetails = require("../models/TradesmanDetails");
-const SubscriptionPlan = require("../models/SubscriptionPlan");
-const UserSubscription = require("../models/UserSubscription");
 const Hire = require("../models/hireModel");
 const Review = require("../models/reviewModel");
 const TravelPlan = require("../models/locationModel");
@@ -195,19 +193,19 @@ exports.register = async (req, res) => {
         portfolioDescription,
       });
 
-      // 6) Default subscription: Free Trial
-      const freePlan = await SubscriptionPlan.findOne({
-        where: { isDefault: true },
-      });
+      // // 6) Default subscription: Free Trial
+      // const freePlan = await SubscriptionPlan.findOne({
+      //   where: { isDefault: true },
+      // });
 
-      if (freePlan) {
-        await UserSubscription.create({
-          userId: user.id,
-          planId: freePlan.id,
-          startDate: new Date(),
-          status: "active",
-        });
-      }
+      // if (freePlan) {
+      //   await UserSubscription.create({
+      //     userId: user.id,
+      //     planId: freePlan.id,
+      //     startDate: new Date(),
+      //     status: "active",
+      //   });
+      // }
     }
 
     return sendResponse(res, 201, true, "User registered successfully", user);

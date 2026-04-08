@@ -15,5 +15,15 @@ router.post(
   verifyToken,
   subscriptionController.createCheckoutSession
 );
+router.post(
+  "/upgrade-plan",
+  verifyToken,
+  subscriptionController.upgradePlan
+);
+router.post(
+  "/downgrade-plan",
+  verifyToken,
+  subscriptionController.downgradePlan
+);
 
 module.exports = router;
