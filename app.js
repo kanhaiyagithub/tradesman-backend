@@ -89,7 +89,7 @@ app.get('/', (req, res) => {
 });
 
 sequelize
-  .sync({ alter: true })
+  .sync()
   .then(() => console.log('✅ MySQL Database synced successfully'))
   .catch((err) => console.error('❌ Database sync error:', err));
 

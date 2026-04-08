@@ -87,6 +87,7 @@ const sendPushNotification = async (userId, title, body, data = {}) => {
             priority: "high",
             notification: {
               channelId: "high_importance_channel",
+              sound: "notification_sound"
             },
           },
 

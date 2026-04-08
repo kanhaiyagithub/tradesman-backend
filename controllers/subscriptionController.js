@@ -1,5 +1,3 @@
-// controllers/subscriptionController.js
-
 const Stripe = require("stripe");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -7,11 +5,25 @@ const SubscriptionPlan = require("../models/SubscriptionPlan");
 const UserSubscription = require("../models/UserSubscription");
 const User = require("../models/User");
 
-const EARLY_ACCESS_LIMIT = 100;
 const TRIAL_DAYS = 14;
+const APP_BASE_URL =
+  process.env.APP_BASE_URL || `http://localhost:${process.env.PORT || 5000}`;
 
 const sendResponse = (res, statusCode, success, message, data = null) =>
   res.status(statusCode).json({ success, message, data });
+
+const getSuccessUrl = () =>
+  `${APP_BASE_URL}/api/subscriptions/success?session_id={CHECKOUT_SESSION_ID}`;
+
+const getCancelUrl = () => `${APP_BASE_URL}/api/subscriptions/cancel`;
+
+const getLatestSubscriptionForUser = async (userId) => {
+  return UserSubscription.findOne({
+    where: { userId },
+    include: [{ model: SubscriptionPlan, as: "plan" }],
+    order: [["createdAt", "DESC"]],
+  });
+};
 
 /**
  * GET /api/subscriptions/plans
@@ -37,12 +49,7 @@ exports.getMySubscription = async (req, res) => {
     const userId = req.user?.id;
     if (!userId) return sendResponse(res, 401, false, "Unauthorized");
 
-    const sub = await UserSubscription.findOne({
-      where: { userId },
-      include: [{ model: SubscriptionPlan, as: "plan" }],
-      order: [["createdAt", "DESC"]],
-    });
-
+    const sub = await getLatestSubscriptionForUser(userId);
     return sendResponse(res, 200, true, "Current subscription", sub);
   } catch (err) {
     console.error("getMySubscription error:", err);
@@ -51,110 +58,130 @@ exports.getMySubscription = async (req, res) => {
 };
 
 /**
- * POST /api/subscriptions/upgrade
+ * POST /api/subscriptions/checkout-session
  */
-exports.upgradePlan = async (req, res) => {
+exports.createCheckoutSession = async (req, res) => {
   try {
     const userId = req.user?.id;
     const role = req.user?.role;
     const { planId } = req.body;
 
     if (!userId) return sendResponse(res, 401, false, "Unauthorized");
-    if (role !== "tradesman")
-      return sendResponse(res, 403, false, "Only tradesmen can upgrade plan");
+    if (role !== "tradesman") {
+      return sendResponse(res, 403, false, "Only tradesmen can subscribe");
+    }
 
-    const plan = await SubscriptionPlan.findByPk(planId);
+    const numericPlanId = Number(planId);
+    if (!numericPlanId) {
+      return sendResponse(res, 400, false, "planId is required");
+    }
+
+    const plan = await SubscriptionPlan.findByPk(numericPlanId);
     if (!plan) return sendResponse(res, 404, false, "Plan not found");
-    if (!plan.stripePriceId)
+    if (!plan.stripePriceId) {
       return sendResponse(res, 400, false, "Stripe price not configured");
+    }
 
     const user = await User.findByPk(userId);
     if (!user) return sendResponse(res, 404, false, "User not found");
 
-    let subscription = await UserSubscription.findOne({ where: { userId } });
+    let localSubscription = await UserSubscription.findOne({
+      where: { userId },
+      order: [["createdAt", "DESC"]],
+    });
 
-    // Prevent duplicate active subscriptions
-    if (subscription?.stripeSubscriptionId && subscription.status !== "canceled") {
-      return sendResponse(res, 400, false, "User already has an active subscription");
+    if (
+      localSubscription &&
+      ["active", "trialing", "past_due", "unpaid"].includes(
+        localSubscription.status
+      ) &&
+      localSubscription.stripeSubscriptionId
+    ) {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "User already has a subscription record. Manage the existing subscription first."
+      );
     }
 
-    if (!subscription) {
-      subscription = await UserSubscription.create({
+    if (!localSubscription || localSubscription.status === "canceled") {
+      localSubscription = await UserSubscription.create({
         userId,
         planId: plan.id,
         startDate: new Date(),
         status: "incomplete",
       });
+    } else {
+      localSubscription.planId = plan.id;
+      localSubscription.status = "incomplete";
+      localSubscription.endDate = null;
+      await localSubscription.save();
     }
 
-    // Create Stripe customer if not exists
-    if (!subscription.stripeCustomerId) {
+    if (!localSubscription.stripeCustomerId) {
       const customer = await stripe.customers.create({
         email: user.email,
-        metadata: { userId },
+        name: user.name,
+        metadata: {
+          userId: String(user.id),
+          role: String(user.role),
+        },
       });
 
-      subscription.stripeCustomerId = customer.id;
-      await subscription.save();
+      localSubscription.stripeCustomerId = customer.id;
+      await localSubscription.save();
     }
 
-    // =============================
-    // 🔥 EARLY ACCESS BUSINESS LOGIC
-    // =============================
-
-    const earlyAccessCount = await UserSubscription.count({
-      where: { isEarlyAccess: true },
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      customer: localSubscription.stripeCustomerId,
+      client_reference_id: String(userId),
+      metadata: {
+        userId: String(userId),
+        planId: String(plan.id),
+      },
+      line_items: [
+        {
+          price: plan.stripePriceId,
+          quantity: 1,
+        },
+      ],
+      subscription_data: {
+        trial_period_days: TRIAL_DAYS,
+        metadata: {
+          userId: String(userId),
+          planId: String(plan.id),
+        },
+      },
+      success_url: getSuccessUrl(),
+      cancel_url: getCancelUrl(),
     });
 
-    const isEarlyAccess = earlyAccessCount < EARLY_ACCESS_LIMIT;
-
-    const stripeSubscriptionPayload = {
-      customer: subscription.stripeCustomerId,
-      items: [{ price: plan.stripePriceId }],
-      payment_behavior: "default_incomplete",
-      expand: ["latest_invoice.payment_intent"],
-    };
-
-    if (isEarlyAccess) {
-      stripeSubscriptionPayload.trial_period_days = TRIAL_DAYS;
-
-      stripeSubscriptionPayload.discounts = [
-        { coupon: process.env.STRIPE_LIFETIME_COUPON_ID },
-      ];
-
-      subscription.isEarlyAccess = true;
-      subscription.hasLifetimeDiscount = true;
-      subscription.trialEndsAt = new Date(
-        Date.now() + TRIAL_DAYS * 24 * 60 * 60 * 1000
-      );
-    } else {
-      subscription.isEarlyAccess = false;
-      subscription.hasLifetimeDiscount = false;
-      subscription.trialEndsAt = null;
-    }
-
-    // =============================
-    // 🔥 CREATE STRIPE SUBSCRIPTION
-    // =============================
-
-    const stripeSub = await stripe.subscriptions.create(
-      stripeSubscriptionPayload
-    );
-
-    subscription.stripeSubscriptionId = stripeSub.id;
-    subscription.planId = plan.id;
-    subscription.status = stripeSub.status; 
-    await subscription.save();
-
-    return sendResponse(res, 200, true, "Subscription created", {
-      stripeSubscriptionId: stripeSub.id,
-      clientSecret:
-  stripeSub.latest_invoice?.payment_intent?.client_secret || null,
-      earlyAccess: isEarlyAccess,
+    return sendResponse(res, 200, true, "Checkout session created", {
+      sessionId: session.id,
+      url: session.url,
     });
-
   } catch (err) {
-    console.error("upgradePlan error FULL:", err);
-    return sendResponse(res, 500, false, "Server error");
+    console.error("createCheckoutSession error:", err);
+    return sendResponse(res, 500, false, err.message || "Server error");
   }
+};
+
+/**
+ * GET /api/subscriptions/success
+ */
+exports.successPage = async (req, res) => {
+  return res.status(200).send(
+    "Subscription checkout completed. You can close this page and return to the app."
+  );
+};
+
+/**
+ * GET /api/subscriptions/cancel
+ */
+exports.cancelPage = async (req, res) => {
+  return res
+    .status(200)
+    .send("Subscription checkout was cancelled. You can return to the app.");
 };
