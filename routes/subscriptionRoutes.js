@@ -26,4 +26,16 @@ router.post(
   subscriptionController.downgradePlan
 );
 
+router.post(
+  "/mobile/setup-intent",
+  verifyToken,
+  subscriptionController.createMobileSetupIntent
+);
+
+router.post(
+  "/mobile/create-subscription",
+  verifyToken,
+  subscriptionController.createMobileSubscription
+);
+
 module.exports = router;

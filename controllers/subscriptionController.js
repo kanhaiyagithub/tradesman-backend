@@ -20,6 +20,30 @@ const getSuccessUrl = () =>
 
 const getCancelUrl = () => `${APP_BASE_URL}/api/subscriptions/cancel`;
 
+const fromUnix = (value) => (value ? new Date(value * 1000) : null);
+
+const getOrCreateStripeCustomerForUser = async (user) => {
+  const latestSubscription = await UserSubscription.findOne({
+    where: { userId: user.id },
+    order: [["createdAt", "DESC"]],
+  });
+
+  if (latestSubscription?.stripeCustomerId) {
+    return latestSubscription.stripeCustomerId;
+  }
+
+  const customer = await stripe.customers.create({
+    email: user.email,
+    name: user.name,
+    metadata: {
+      userId: String(user.id),
+      role: String(user.role),
+    },
+  });
+
+  return customer.id;
+};
+
 const getLatestSubscriptionForUser = async (userId) => {
   return UserSubscription.findOne({
     where: { userId },
@@ -407,4 +431,259 @@ exports.cancelPage = async (req, res) => {
   return res
     .status(200)
     .send("Subscription checkout was cancelled. You can return to the app.");
+};
+
+/**
+ * POST /api/subscriptions/mobile/setup-intent
+ */
+exports.createMobileSetupIntent = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const role = req.user?.role;
+
+    if (!userId) return sendResponse(res, 401, false, "Unauthorized");
+    if (role !== "tradesman") {
+      return sendResponse(
+        res,
+        403,
+        false,
+        "Only tradesmen can start mobile subscription setup"
+      );
+    }
+
+    if (!process.env.STRIPE_EPHEMERAL_KEY_API_VERSION) {
+      return sendResponse(
+        res,
+        500,
+        false,
+        "STRIPE_EPHEMERAL_KEY_API_VERSION is not configured"
+      );
+    }
+
+    const existingSubscription = await getManageableSubscriptionForUser(userId);
+    if (
+      existingSubscription &&
+      existingSubscription.stripeSubscriptionId &&
+      ["active", "trialing"].includes(existingSubscription.status)
+    ) {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "User already has an active or trialing subscription. Use upgrade/downgrade APIs instead."
+      );
+    }
+
+    const user = await User.findByPk(userId);
+    if (!user) {
+      return sendResponse(res, 404, false, "User not found");
+    }
+
+    const customerId = await getOrCreateStripeCustomerForUser(user);
+
+    const ephemeralKey = await stripe.ephemeralKeys.create(
+      { customer: customerId },
+      { apiVersion: process.env.STRIPE_EPHEMERAL_KEY_API_VERSION }
+    );
+
+    const setupIntent = await stripe.setupIntents.create({
+      customer: customerId,
+      automatic_payment_methods: { enabled: true },
+      usage: "off_session",
+      metadata: {
+        userId: String(userId),
+        role: String(role),
+      },
+    });
+
+    return sendResponse(
+      res,
+      200,
+      true,
+      "Mobile setup intent created",
+      {
+        publishableKey: process.env.STRIPE_PUBLISHABLE_KEY,
+        customerId,
+        customerEphemeralKeySecret: ephemeralKey.secret,
+        setupIntentClientSecret: setupIntent.client_secret,
+        setupIntentId: setupIntent.id,
+      }
+    );
+  } catch (err) {
+    console.error("createMobileSetupIntent error:", err);
+    return sendResponse(res, 500, false, err.message || "Server error");
+  }
+};
+
+
+/**
+ * POST /api/subscriptions/mobile/create-subscription
+ */
+exports.createMobileSubscription = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const role = req.user?.role;
+    const planId = Number(req.body?.planId);
+    const setupIntentId = req.body?.setupIntentId;
+
+    if (!userId) return sendResponse(res, 401, false, "Unauthorized");
+    if (role !== "tradesman") {
+      return sendResponse(
+        res,
+        403,
+        false,
+        "Only tradesmen can create mobile subscriptions"
+      );
+    }
+
+    if (!planId) {
+      return sendResponse(res, 400, false, "planId is required");
+    }
+
+    if (!setupIntentId) {
+      return sendResponse(res, 400, false, "setupIntentId is required");
+    }
+
+    const existingSubscription = await getManageableSubscriptionForUser(userId);
+    if (
+      existingSubscription &&
+      existingSubscription.stripeSubscriptionId &&
+      ["active", "trialing"].includes(existingSubscription.status)
+    ) {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "User already has an active or trialing subscription. Use upgrade/downgrade APIs instead."
+      );
+    }
+
+    const plan = await SubscriptionPlan.findByPk(planId);
+    if (!plan) {
+      return sendResponse(res, 404, false, "Plan not found");
+    }
+
+    if (!plan.stripePriceId) {
+      return sendResponse(res, 400, false, "Stripe price not configured");
+    }
+
+    const user = await User.findByPk(userId);
+    if (!user) {
+      return sendResponse(res, 404, false, "User not found");
+    }
+
+    const setupIntent = await stripe.setupIntents.retrieve(setupIntentId);
+
+    if (!setupIntent) {
+      return sendResponse(res, 404, false, "SetupIntent not found");
+    }
+
+    if (setupIntent.status !== "succeeded") {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "SetupIntent is not completed yet"
+      );
+    }
+
+    const customerId =
+      typeof setupIntent.customer === "string"
+        ? setupIntent.customer
+        : setupIntent.customer?.id;
+
+    const paymentMethodId =
+      typeof setupIntent.payment_method === "string"
+        ? setupIntent.payment_method
+        : setupIntent.payment_method?.id;
+
+    if (!customerId || !paymentMethodId) {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "SetupIntent does not contain a customer or payment method"
+      );
+    }
+
+    const stripeCustomer = await stripe.customers.retrieve(customerId);
+
+    if (
+      stripeCustomer?.deleted ||
+      String(stripeCustomer?.metadata?.userId || "") !== String(userId)
+    ) {
+      return sendResponse(
+        res,
+        403,
+        false,
+        "SetupIntent customer does not belong to this user"
+      );
+    }
+
+    let localSubscription = await UserSubscription.findOne({
+      where: { userId },
+      order: [["createdAt", "DESC"]],
+    });
+
+    if (!localSubscription || localSubscription.status === "canceled") {
+      localSubscription = await UserSubscription.create({
+        userId,
+        planId: plan.id,
+        startDate: new Date(),
+        status: "incomplete",
+      });
+    } else {
+      localSubscription.planId = plan.id;
+      localSubscription.status = "incomplete";
+      localSubscription.endDate = null;
+      await localSubscription.save();
+    }
+
+    localSubscription.stripeCustomerId = customerId;
+    await localSubscription.save();
+
+    const stripeSubscription = await stripe.subscriptions.create({
+      customer: customerId,
+      items: [{ price: plan.stripePriceId }],
+      default_payment_method: paymentMethodId,
+      trial_period_days: TRIAL_DAYS,
+      payment_settings: {
+        save_default_payment_method: "on_subscription",
+      },
+      metadata: {
+        userId: String(userId),
+        planId: String(plan.id),
+      },
+    });
+
+    localSubscription.stripeSubscriptionId = stripeSubscription.id;
+    localSubscription.status = stripeSubscription.status;
+    localSubscription.trialEndsAt = fromUnix(stripeSubscription.trial_end);
+    localSubscription.currentPeriodStart = fromUnix(
+      stripeSubscription.current_period_start
+    );
+    localSubscription.currentPeriodEnd = fromUnix(
+      stripeSubscription.current_period_end
+    );
+    localSubscription.cancelAtPeriodEnd =
+      !!stripeSubscription.cancel_at_period_end;
+
+    await localSubscription.save();
+
+    return sendResponse(
+      res,
+      200,
+      true,
+      "Mobile subscription created successfully",
+      {
+        subscriptionId: stripeSubscription.id,
+        status: stripeSubscription.status,
+        trialEndsAt: localSubscription.trialEndsAt,
+        note: "Webhook will continue syncing final subscription lifecycle updates.",
+      }
+    );
+  } catch (err) {
+    console.error("createMobileSubscription error:", err);
+    return sendResponse(res, 500, false, err.message || "Server error");
+  }
 };
