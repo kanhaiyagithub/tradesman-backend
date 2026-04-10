@@ -22,8 +22,9 @@ router.post('/login', userController.login);
 router.get('/tradesmen', userController.getAllTradesmen);
 router.get('/clients', userController.getAllClients);
 
-// ✅ SINGLE FILTER ROUTE (FIXED)
+// ✅ FILTER ROUTE (supports GET + POST)
 router.get('/tradesmen/filter', userController.filterTradesmen);
+router.post('/tradesmen/filter', userController.filterTradesmen);
 
 // Profiles
 router.get('/profile/:id', userController.getFullUserProfile);

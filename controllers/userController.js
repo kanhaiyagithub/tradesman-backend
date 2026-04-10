@@ -5,6 +5,8 @@ const Review = require("../models/reviewModel");
 const TravelPlan = require("../models/locationModel");
 const TradesType = require("../models/tradesTypeModel");
 
+const DEFAULT_FILTER_RADIUS_KM = 15;
+
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Op, fn, col, literal } = require("sequelize");
@@ -74,6 +76,84 @@ const paginatedResponse = (res, message, result, page, limit) => {
     },
     data: rows,
   });
+};
+
+const getDistanceKm = (lat1, lon1, lat2, lon2) => {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+};
+
+const parseFilterInput = (req) => {
+  return req.method === "POST" ? { ...req.query, ...(req.body || {}) } : req.query;
+};
+
+const normalizeTradeTypeIds = (input) => {
+  if (input === undefined || input === null || input === "") return [];
+
+  const values = Array.isArray(input)
+    ? input
+    : String(input)
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+  const ids = values.map((item) => Number(item));
+
+  if (ids.some((item) => Number.isNaN(item))) {
+    return null;
+  }
+
+  return [...new Set(ids)];
+};
+
+const normalizeDateOrNull = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const getStopPointsFromTravelPlan = (travelPlan) => {
+  if (!travelPlan?.allowStops || !Array.isArray(travelPlan.stops)) {
+    return [];
+  }
+
+  return travelPlan.stops
+    .filter((stop) => stop && typeof stop === "object")
+    .map((stop) => ({
+      name: stop.name || "Stop",
+      latitude: Number(stop.latitude),
+      longitude: Number(stop.longitude),
+      expectedDateTime: stop.expectedDateTime || null,
+    }))
+    .filter(
+      (stop) =>
+        !Number.isNaN(stop.latitude) &&
+        !Number.isNaN(stop.longitude),
+    );
+};
+
+const isStopWithinDateRange = (stop, startDate, endDate) => {
+  if (!startDate && !endDate) return true;
+  if (!stop?.expectedDateTime) return false;
+
+  const stopTime = new Date(stop.expectedDateTime).getTime();
+  if (Number.isNaN(stopTime)) return false;
+
+  if (startDate && stopTime < startDate.getTime()) return false;
+  if (endDate && stopTime > endDate.getTime()) return false;
+
+  return true;
 };
 
 exports.register = async (req, res) => {
@@ -940,35 +1020,124 @@ exports.getFullUserProfile = async (req, res) => {
 
 exports.filterTradesmen = async (req, res) => {
   try {
-    console.log("🔥 NEW FILTER CONTROLLER HIT 🔥");
-    console.log("🔍 Incoming filter query:", req.query);
+    console.log("🔥 FILTER TRADESMEN HIT 🔥");
+    console.log("🔍 Incoming filter request:", {
+      method: req.method,
+      query: req.query,
+      body: req.body,
+    });
 
+    const input = parseFilterInput(req);
     const {
       tradeTypeId,
-      tradeType,
+      tradeTypeIds,
+      latitude,
+      longitude,
       lat,
       lng,
-      radius = 40,
+      startDate,
+      endDate,
       rating,
-      verified,
-      availability,
-    } = req.query;
+    } = input;
 
-    const userLat = lat ? Number(lat) : null;
-    const userLng = lng ? Number(lng) : null;
-    const maxRadius = Number(radius);
+    const requestedLatitude =
+      latitude !== undefined && latitude !== null && latitude !== ""
+        ? Number(latitude)
+        : lat !== undefined && lat !== null && lat !== ""
+          ? Number(lat)
+          : null;
 
-    let whereUser = { role: "tradesman" };
-    let whereTrade = {};
+    const requestedLongitude =
+      longitude !== undefined && longitude !== null && longitude !== ""
+        ? Number(longitude)
+        : lng !== undefined && lng !== null && lng !== ""
+          ? Number(lng)
+          : null;
 
-    /* ================= 1️⃣ TRADE TYPE FILTER ================= */
+    if (
+      (requestedLatitude !== null && Number.isNaN(requestedLatitude)) ||
+      (requestedLongitude !== null && Number.isNaN(requestedLongitude))
+    ) {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "latitude and longitude must be valid numbers",
+      );
+    }
+
+    if ((requestedLatitude === null) !== (requestedLongitude === null)) {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "latitude and longitude must be provided together",
+      );
+    }
+
+    const normalizedStartDate = normalizeDateOrNull(startDate);
+    const normalizedEndDate = normalizeDateOrNull(endDate);
+
+    if ((startDate && !normalizedStartDate) || (endDate && !normalizedEndDate)) {
+      return sendResponse(res, 400, false, "startDate or endDate is invalid");
+    }
+
+    if (!!startDate !== !!endDate) {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "startDate and endDate must be provided together",
+      );
+    }
+
+    if (
+      normalizedStartDate &&
+      normalizedEndDate &&
+      normalizedStartDate.getTime() > normalizedEndDate.getTime()
+    ) {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "startDate cannot be greater than endDate",
+      );
+    }
+
+    const minimumRating =
+      rating !== undefined && rating !== null && rating !== ""
+        ? Number(rating)
+        : null;
+
+    if (
+      minimumRating !== null &&
+      (Number.isNaN(minimumRating) || minimumRating < 0 || minimumRating > 5)
+    ) {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "rating must be a valid number between 0 and 5",
+      );
+    }
+
+    let normalizedTradeTypeIds = normalizeTradeTypeIds(tradeTypeIds);
+    if (normalizedTradeTypeIds === null) {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "tradeTypeIds must contain only valid numbers",
+      );
+    }
 
     if (
       tradeTypeId !== undefined &&
       tradeTypeId !== null &&
       tradeTypeId !== ""
     ) {
-      if (Number.isNaN(Number(tradeTypeId))) {
+      const singleTradeTypeId = Number(tradeTypeId);
+      if (Number.isNaN(singleTradeTypeId)) {
         return sendResponse(
           res,
           400,
@@ -977,132 +1146,198 @@ exports.filterTradesmen = async (req, res) => {
         );
       }
 
-      whereTrade.tradeTypeId = Number(tradeTypeId);
-    } else if (tradeType) {
-      whereTrade.tradeType = tradeType;
+      normalizedTradeTypeIds = [
+        ...new Set([singleTradeTypeId, ...normalizedTradeTypeIds]),
+      ];
     }
 
-    /* ================= 2️⃣ VERIFIED FILTER ================= */
+    const shouldApplyStopFilter =
+      requestedLatitude !== null ||
+      (normalizedStartDate !== null && normalizedEndDate !== null);
 
-    if (verified === "true") {
-      whereTrade.isApproved = true;
-      console.log("✅ Verified tradesmen only");
+    const tradesmanWhere = {
+      isApproved: true,
+    };
+
+    if (normalizedTradeTypeIds.length === 1) {
+      tradesmanWhere.tradeTypeId = normalizedTradeTypeIds[0];
+    } else if (normalizedTradeTypeIds.length > 1) {
+      tradesmanWhere.tradeTypeId = { [Op.in]: normalizedTradeTypeIds };
     }
 
-    /* ================= 3️⃣ AVAILABILITY FILTER ================= */
-    // NOTE:
-    // availability filter should ideally use TravelPlan table, not TradesmanDetails.
-    // Keeping log only for now so this function doesn't break on wrong columns.
-    if (availability === "today") {
-      console.log(
-        "⚠️ availability=today received, but availability should be checked from TravelPlan",
-      );
+    const include = [
+      {
+        model: TradesmanDetails,
+        as: "TradesmanDetail",
+        where: tradesmanWhere,
+        required: true,
+      },
+    ];
+
+    if (shouldApplyStopFilter) {
+      include.push({
+        model: TravelPlan,
+        as: "travelPlans",
+        where: { status: "open" },
+        required: true,
+      });
     }
 
-    /* ================= 4️⃣ FETCH TRADESMEN ================= */
-
-    let tradesmen = await User.findAll({
-      where: whereUser,
-      include: [
-        {
-          model: TradesmanDetails,
-          as: "TradesmanDetail",
-          where: whereTrade,
-          required: true,
-        },
-      ],
+    const tradesmen = await User.findAll({
+      where: { role: "tradesman" },
+      include,
+      order: [["createdAt", "DESC"]],
     });
 
     console.log(`📦 Tradesmen fetched from DB: ${tradesmen.length}`);
 
     if (!tradesmen.length) {
-      return res.json({
-        success: true,
-        message: "No tradesmen found",
+      return sendResponse(res, 200, true, "Filtered tradesmen", {
+        radiusKm: DEFAULT_FILTER_RADIUS_KM,
+        appliedFilters: {
+          tradeTypeIds: normalizedTradeTypeIds,
+          latitude: requestedLatitude,
+          longitude: requestedLongitude,
+          startDate: normalizedStartDate,
+          endDate: normalizedEndDate,
+          rating: minimumRating,
+        },
+        count: 0,
         data: [],
       });
     }
 
-    /* ================= 5️⃣ RATING FILTER ================= */
+    const ratingRows = await Review.findAll({
+      attributes: [
+        "toUserId",
+        [fn("AVG", col("rating")), "avgRating"],
+        [fn("COUNT", col("id")), "reviewCount"],
+      ],
+      where: {
+        toUserId: tradesmen.map((tradesman) => tradesman.id),
+      },
+      group: ["toUserId"],
+      raw: true,
+    });
 
-    if (rating) {
-      console.log(`⭐ Applying rating filter >= ${rating}`);
-
-      const ratings = await Review.findAll({
-        attributes: ["toUserId", [fn("AVG", col("rating")), "avgRating"]],
-        where: {
-          toUserId: tradesmen.map((t) => t.id),
+    const ratingMap = Object.fromEntries(
+      ratingRows.map((item) => [
+        Number(item.toUserId),
+        {
+          avgRating: Number(Number(item.avgRating || 0).toFixed(1)),
+          reviewCount: Number(item.reviewCount || 0),
         },
-        group: ["toUserId"],
-        raw: true,
-      });
+      ]),
+    );
 
-      const ratingMap = Object.fromEntries(
-        ratings.map((r) => [r.toUserId, Number(r.avgRating)]),
-      );
+    const filteredTradesmen = tradesmen
+      .map((tradesman) => {
+        const json = tradesman.toJSON();
+        const reviewSummary = ratingMap[tradesman.id] || {
+          avgRating: 0,
+          reviewCount: 0,
+        };
 
-      tradesmen = tradesmen.filter((t) => {
-        const avg = ratingMap[t.id] || 0;
-        t.dataValues.avgRating = avg;
-        return avg >= Number(rating);
-      });
+        if (
+          minimumRating !== null &&
+          Number(reviewSummary.avgRating) < minimumRating
+        ) {
+          return null;
+        }
 
-      console.log(`⭐ After rating filter: ${tradesmen.length}`);
-    }
+        let bestMatchedStop = null;
 
-    /* ================= 6️⃣ GPS DISTANCE FILTER ================= */
+        if (shouldApplyStopFilter) {
+          const travelPlans = Array.isArray(json.travelPlans) ? json.travelPlans : [];
 
-    if (userLat !== null && userLng !== null) {
-      console.log("📍 Applying GPS filter", {
-        userLat,
-        userLng,
-        maxRadius,
-      });
+          for (const travelPlan of travelPlans) {
+            const stopPoints = getStopPointsFromTravelPlan(travelPlan);
 
-      const R = 6371;
+            for (const stop of stopPoints) {
+              if (
+                !isStopWithinDateRange(
+                  stop,
+                  normalizedStartDate,
+                  normalizedEndDate,
+                )
+              ) {
+                continue;
+              }
 
-      tradesmen = tradesmen.filter((t) => {
-        const location = t.TradesmanDetail?.currentLocation;
-        if (!location) return false;
+              let distanceKm = null;
 
-        const [tLat, tLng] = location.split(",").map(Number);
-        if (Number.isNaN(tLat) || Number.isNaN(tLng)) return false;
+              if (requestedLatitude !== null && requestedLongitude !== null) {
+                distanceKm = Number(
+                  getDistanceKm(
+                    requestedLatitude,
+                    requestedLongitude,
+                    stop.latitude,
+                    stop.longitude,
+                  ).toFixed(2),
+                );
 
-        const dLat = ((tLat - userLat) * Math.PI) / 180;
-        const dLng = ((tLng - userLng) * Math.PI) / 180;
+                if (distanceKm > DEFAULT_FILTER_RADIUS_KM) {
+                  continue;
+                }
+              }
 
-        const a =
-          Math.sin(dLat / 2) ** 2 +
-          Math.cos((userLat * Math.PI) / 180) *
-            Math.cos((tLat * Math.PI) / 180) *
-            Math.sin(dLng / 2) ** 2;
+              if (
+                !bestMatchedStop ||
+                (distanceKm !== null &&
+                  (bestMatchedStop.distanceKm === null ||
+                    distanceKm < bestMatchedStop.distanceKm)) ||
+                (distanceKm === null &&
+                  !bestMatchedStop.expectedDateTime &&
+                  stop.expectedDateTime)
+              ) {
+                bestMatchedStop = {
+                  ...stop,
+                  distanceKm,
+                  travelPlanId: travelPlan.id,
+                };
+              }
+            }
+          }
 
-        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        const distance = R * c;
+          if (!bestMatchedStop) {
+            return null;
+          }
+        }
 
-        t.dataValues.distance = Number(distance.toFixed(2));
+        return {
+          ...json,
+          tradeTypeId: json.TradesmanDetail?.tradeTypeId || null,
+          tradeType: json.TradesmanDetail?.tradeType || null,
+          avgRating: reviewSummary.avgRating,
+          reviewCount: reviewSummary.reviewCount,
+          matchedStop: bestMatchedStop
+            ? {
+                name: bestMatchedStop.name,
+                latitude: bestMatchedStop.latitude,
+                longitude: bestMatchedStop.longitude,
+                expectedDateTime: bestMatchedStop.expectedDateTime,
+              }
+            : null,
+          matchedDistanceKm: bestMatchedStop?.distanceKm ?? null,
+          matchedTravelPlanId: bestMatchedStop?.travelPlanId ?? null,
+        };
+      })
+      .filter(Boolean);
 
-        return distance <= maxRadius;
-      });
+    console.log(`✅ Tradesmen after filter pipeline: ${filteredTradesmen.length}`);
 
-      console.log(`📍 After GPS filter: ${tradesmen.length}`);
-    }
-
-    /* ================= FINAL RESPONSE ================= */
-
-    const formattedTradesmen = tradesmen.map((t) => ({
-      ...t.toJSON(),
-      tradeTypeId: t.TradesmanDetail?.tradeTypeId || null,
-      tradeType: t.TradesmanDetail?.tradeType || null,
-      distance: t.dataValues.distance || null,
-      avgRating: t.dataValues.avgRating || 0,
-    }));
-
-    return res.json({
-      success: true,
-      message: "Filtered tradesmen",
-      count: formattedTradesmen.length,
-      data: formattedTradesmen,
+    return sendResponse(res, 200, true, "Filtered tradesmen", {
+      radiusKm: DEFAULT_FILTER_RADIUS_KM,
+      appliedFilters: {
+        tradeTypeIds: normalizedTradeTypeIds,
+        latitude: requestedLatitude,
+        longitude: requestedLongitude,
+        startDate: normalizedStartDate,
+        endDate: normalizedEndDate,
+        rating: minimumRating,
+      },
+      count: filteredTradesmen.length,
+      data: filteredTradesmen,
     });
   } catch (err) {
     console.error("❌ Filter Error:", err);
