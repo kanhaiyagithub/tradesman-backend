@@ -3,7 +3,8 @@ const dotenv = require("dotenv");
 const app = require("./app");
 const socket = require("./socket");
 
-dotenv.config({ path: "./config/config.env" });
+// dotenv.config({ path: "./config/config.env" });
+dotenv.config();
 
 const server = http.createServer(app);
 socket.init(server);

@@ -6,7 +6,8 @@ const passport = require('passport');
 const sequelize = require('./config/db');
 const path = require("path");
 
-dotenv.config({ path: './config/config.env' });
+// dotenv.config({ path: './config/config.env' });
+dotenv.config();
 
 require('./config/passport');
 
