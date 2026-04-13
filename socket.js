@@ -145,6 +145,15 @@ module.exports = {
         }
       });
 
+      socket.on("message-received", (payload = {}) => {
+        console.log("[MESSAGE RECEIVED ACK]", {
+          socketId: socket.id,
+          userId: socket.userId || socket.user?.id,
+          payload,
+          at: new Date().toISOString(),
+        });
+      });
+
       /**
        * LIVE LOCATION UPDATE
        * payload: { latitude, longitude }
