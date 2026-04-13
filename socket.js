@@ -49,6 +49,20 @@ module.exports = {
         userId: socket.user?.id,
       });
 
+      const resolvedUserId = String(socket.user?.id || "");
+
+      if (resolvedUserId) {
+        onlineUsers.set(resolvedUserId, socket.id);
+        socket.userId = resolvedUserId;
+
+        console.log("👤 User auto-registered:", {
+          userId: resolvedUserId,
+          socketId: socket.id,
+        });
+      } else {
+        console.log("[AUTO-REGISTER] userId missing from auth token");
+      }
+
       /**
        * REGISTER USER
        * optional for chat presence mapping
@@ -122,7 +136,7 @@ module.exports = {
           await db.execute(
             `INSERT INTO messages (room_id, sender_id, message)
              VALUES (?, ?, ?)`,
-            [roomId, senderId, message]
+            [roomId, senderId, message],
           );
 
           console.log("[DB] message insert success");
