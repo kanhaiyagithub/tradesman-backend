@@ -1,11 +1,18 @@
-// controllers/chatController.js
-const { Op, Sequelize } = require("sequelize");
-const Message = require("../models/messageModel");
-const User = require("../models/User");
-const { sendPushNotification } = require("./notificationController");
+const { sendPushNotification } = require('./notificationController');
+const User = require('../models/User');
+const chatService = require('../services/chatService');
 
-/* ================= HELPERS ================= */
-
+/**
+ * Sends a normalized API response for chat endpoints.
+ *
+ * @param {import('express').Response} res - Express response object.
+ * @param {number} statusCode - HTTP status code.
+ * @param {boolean} success - Whether the request succeeded.
+ * @param {string} message - Human-readable status message.
+ * @param {object|null} [data=null] - Response payload.
+ * @param {string|null} [error=null] - Optional error details.
+ * @returns {import('express').Response} Express JSON response.
+ */
 const sendResponse = (
   res,
   statusCode,
@@ -13,298 +20,264 @@ const sendResponse = (
   message,
   data = null,
   error = null,
-) => {
-  console.log("[RESPONSE]", { statusCode, success, message });
-  return res.status(statusCode).json({ success, message, data, error });
-};
+) => res.status(statusCode).json({ success, message, data, error });
 
+/**
+ * Parses page/limit values shared by inbox and legacy history endpoints.
+ *
+ * @param {import('express').Request} req - Express request.
+ * @param {number} [defaultLimit=20] - Fallback page size.
+ * @returns {{ page: number, limit: number }} Normalized pagination values.
+ */
 const parsePagination = (req, defaultLimit = 20) => {
   const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
   const limit = Math.min(
     Math.max(parseInt(req.query.limit, 10) || defaultLimit, 1),
     100,
   );
-  const offset = (page - 1) * limit;
 
-  console.log("[PAGINATION]", { page, limit, offset });
-  return { page, limit, offset };
+  return { page, limit };
 };
 
-const paginatedResponse = (res, message, items, total, page, limit) => {
-  console.log("[PAGINATED RESPONSE]", { total, page, limit });
-  return sendResponse(res, 200, true, message, {
+/**
+ * Extracts cursor-style history pagination without breaking existing clients.
+ *
+ * Accepted query aliases:
+ * - beforeMessageId
+ * - cursor
+ *
+ * @param {import('express').Request} req - Express request.
+ * @returns {{ beforeMessageId: number|null }} Cursor settings.
+ */
+const parseConversationCursor = (req) => {
+  const rawBeforeMessageId = req.query.beforeMessageId || req.query.cursor;
+  const beforeMessageId = rawBeforeMessageId ? Number(rawBeforeMessageId) || null : null;
+
+  return { beforeMessageId };
+};
+
+/**
+ * Returns a paginated success response with optional extra metadata.
+ *
+ * Existing frontend consumers can keep using `meta.total/page/perPage/totalPages`,
+ * while newer clients can read cursor metadata when present.
+ *
+ * @param {import('express').Response} res - Express response.
+ * @param {string} message - Response message.
+ * @param {Array} items - Returned items.
+ * @param {number} total - Total item count.
+ * @param {number} page - Current page.
+ * @param {number} limit - Page size.
+ * @param {object} [extraMeta={}] - Additional metadata fields.
+ * @returns {import('express').Response} Express JSON response.
+ */
+const paginatedResponse = (res, message, items, total, page, limit, extraMeta = {}) =>
+  sendResponse(res, 200, true, message, {
     meta: {
       total,
       page,
       perPage: limit,
       totalPages: Math.ceil(total / limit),
+      ...extraMeta,
     },
     data: items,
   });
+
+/**
+ * Emits the saved message to the target user's socket connections.
+ *
+ * @param {object} payload - Serialized chat payload.
+ * @returns {Promise<void>} Resolves after the emit attempt finishes.
+ */
+const emitMessageToSocketUsers = async (payload) => {
+  try {
+    const { emitToUser } = require('../socket');
+    emitToUser(payload.receiverId, 'receive-message', payload);
+  } catch (error) {
+    console.warn('[CHAT SOCKET EMIT ERROR]', error.message);
+  }
 };
 
-/* ================= SEND MESSAGE ================= */
+/**
+ * Sends a push notification for a direct chat message.
+ *
+ * @param {number} senderId - Message sender id.
+ * @param {number} receiverId - Message receiver id.
+ * @param {string} message - Raw message body.
+ * @returns {Promise<void>} Resolves after the push attempt finishes.
+ */
+const sendChatPush = async (senderId, receiverId, message) => {
+  try {
+    const sender = await User.findByPk(senderId, { attributes: ['name'] });
+    const senderName = sender?.name || 'Someone';
 
+    await sendPushNotification(
+      receiverId,
+      `New Message from ${senderName}`,
+      message.length > 60 ? `${message.substring(0, 60)}...` : message,
+      {
+        type: 'CHAT',
+        senderId,
+        click_action: 'FLUTTER_NOTIFICATION_CLICK',
+      },
+    );
+  } catch (error) {
+    console.error('[CHAT PUSH ERROR]', error.message);
+  }
+};
+
+/**
+ * Persists a new chat message through the shared chat service.
+ *
+ * @param {import('express').Request} req - Express request.
+ * @param {import('express').Response} res - Express response.
+ * @returns {Promise<import('express').Response>} API response.
+ */
 exports.sendMessage = async (req, res) => {
-  const t = await Message.sequelize.transaction();
   try {
     const senderId = req.user?.id;
     const { receiverId, message } = req.body;
 
-    console.log("[SEND MESSAGE]", { senderId, receiverId, message });
-
-    if (!senderId) return sendResponse(res, 401, false, "Unauthorized");
-    if (!receiverId || !message)
-      return sendResponse(res, 400, false, "receiverId and message required");
-
-    const newMsg = await Message.create(
-      {
-        senderId,
-        receiverId,
-        message,
-        isRead: false,
-      },
-      { transaction: t },
-    );
-
-    await t.commit();
-
-    console.log("[MESSAGE SAVED]", newMsg.id);
-
-    /* SOCKET (SAFE) */
-    try {
-      const { getIO, getOnlineUsers } = require("../socket");
-      const io = getIO();
-      const onlineUsers = getOnlineUsers();
-      const receiverSocket = onlineUsers.get(String(receiverId));
-      console.log("[CHAT SOCKET CHECK]", {
-        receiverId,
-        receiverSocket,
-        onlineUsersSize: onlineUsers.size,
-      });
-      if (receiverSocket) {
-        io.to(receiverSocket).emit("receive-message", newMsg);
-        console.log("[SOCKET] emitted to", receiverSocket);
-      }
-    } catch (e) {
-      console.warn("[SOCKET ERROR]", e.message);
+    if (!senderId) {
+      return sendResponse(res, 401, false, 'Unauthorized');
     }
 
-    /* PUSH NOTIFICATION (to RECEIVER) */
-    try {
-      const sender = await User.findByPk(senderId, { attributes: ["name"] });
-      const senderName = sender?.name || "Someone";
+    const newMessage = await chatService.sendDirectMessage({
+      senderId,
+      receiverId,
+      message,
+    });
 
-      // Only send if the receiver is not actively online on this specific socket
-      // (Optional: can be added here if needed)
+    await emitMessageToSocketUsers(newMessage);
+    await sendChatPush(senderId, receiverId, message);
 
-      await sendPushNotification(
-        receiverId,
-        `New Message from ${senderName}`,
-        message.length > 60 ? `${message.substring(0, 60)}...` : message,
-        {
-          type: "CHAT",
-          senderId: senderId,
-          click_action: "FLUTTER_NOTIFICATION_CLICK", // Common for Flutter deep-linking
-        },
-      );
-    } catch (pushErr) {
-      console.error("[PUSH NOTIFICATION ERROR]", pushErr.message);
-      // Non-blocking: We don't fail the API call if the push fails
-    }
+    return sendResponse(res, 201, true, 'Message sent', newMessage);
+  } catch (error) {
+    console.error('[SEND MESSAGE ERROR]', error);
 
-    return sendResponse(res, 201, true, "Message sent", newMsg);
-  } catch (err) {
-    await t.rollback();
-    console.error("[SEND MESSAGE ERROR]", err);
-    return sendResponse(res, 500, false, "Server error");
+    const statusCode =
+      error.message === 'Unauthorized sender'
+        ? 401
+        : error.message === 'Receiver not found' || error.message === 'Sender not found'
+          ? 404
+          : 400;
+
+    return sendResponse(res, statusCode, false, error.message || 'Server error');
   }
 };
 
-/* ================= GET CONVERSATION ================= */
-
+/**
+ * Reads direct-message history with backward-compatible page/limit support.
+ *
+ * Newer clients may also send `beforeMessageId` or `cursor` to use cursor-based
+ * pagination for older history without changing the response shape.
+ *
+ * @param {import('express').Request} req - Express request.
+ * @param {import('express').Response} res - Express response.
+ * @returns {Promise<import('express').Response>} API response.
+ */
 exports.getConversation = async (req, res) => {
   try {
     const loggedUser = Number(req.user?.id);
     const otherUserId = Number(req.params.userId);
 
-    console.log("[GET CONVERSATION]", { loggedUser, otherUserId });
+    if (!loggedUser) {
+      return sendResponse(res, 401, false, 'Unauthorized');
+    }
 
-    if (!loggedUser) return sendResponse(res, 401, false, "Unauthorized");
-    if (!otherUserId) return sendResponse(res, 400, false, "Invalid userId");
+    if (!otherUserId) {
+      return sendResponse(res, 400, false, 'Invalid userId');
+    }
 
-    const { page, limit, offset } = parsePagination(req);
-
-    const where = {
-      [Op.or]: [
-        { senderId: loggedUser, receiverId: otherUserId },
-        { senderId: otherUserId, receiverId: loggedUser },
-      ],
-    };
-
-    console.log("[CONVERSATION WHERE]", where);
-
-    // 🔥 DESC for performance
-    const { rows, count } = await Message.findAndCountAll({
-      where,
-      order: [["createdAt", "DESC"]],
+    const { page, limit } = parsePagination(req);
+    const { beforeMessageId } = parseConversationCursor(req);
+    const result = await chatService.getConversationMessages({
+      loggedUserId: loggedUser,
+      otherUserId,
+      page,
       limit,
-      offset,
+      beforeMessageId,
     });
-
-    console.log("[MESSAGES FETCHED]", { count: rows.length });
-
-    const userIds = [
-      ...new Set(rows.flatMap((m) => [m.senderId, m.receiverId])),
-    ];
-
-    const users = await User.findAll({
-      where: { id: userIds },
-      attributes: ["id", "name", "email", "role", "profileImage"],
-    });
-
-    const userMap = Object.fromEntries(users.map((u) => [u.id, u]));
-
-    // 🔥 Reverse for UI (chat order)
-    const messages = rows.reverse().map((m) => ({
-      id: m.id,
-      senderId: m.senderId,
-      receiverId: m.receiverId,
-      message: m.message,
-      isRead: m.isRead,
-      createdAt: m.createdAt,
-      isMine: m.senderId === loggedUser,
-      sender: userMap[m.senderId] || null,
-      receiver: userMap[m.receiverId] || null,
-    }));
 
     return paginatedResponse(
       res,
-      "Conversation fetched",
-      messages,
-      count,
-      page,
-      limit,
+      'Conversation fetched',
+      result.items,
+      result.total,
+      result.page,
+      result.limit,
+      {
+        hasMore: result.hasMore,
+        nextCursor: result.nextCursor,
+        mode: result.mode,
+      },
     );
-  } catch (err) {
-    console.error("[GET CONVERSATION ERROR]", err);
-    return sendResponse(res, 500, false, "Server error");
+  } catch (error) {
+    console.error('[GET CONVERSATION ERROR]', error);
+    return sendResponse(res, 500, false, 'Server error');
   }
 };
 
-/* ================= CHAT LIST ================= */
-
+/**
+ * Reads the authenticated user's inbox from conversation summary tables.
+ *
+ * @param {import('express').Request} req - Express request.
+ * @param {import('express').Response} res - Express response.
+ * @returns {Promise<import('express').Response>} API response.
+ */
 exports.getChatList = async (req, res) => {
   try {
     const userId = Number(req.user?.id);
-    if (!userId) return sendResponse(res, 401, false, "Unauthorized");
 
-    const { page, limit, offset } = parsePagination(req);
+    if (!userId) {
+      return sendResponse(res, 401, false, 'Unauthorized');
+    }
 
-    console.log("[CHAT LIST]", { userId });
-
-    // 🔥 FIXED: camelCase columns + DESC
-    const conversations = await Message.findAll({
-      attributes: [
-        [
-          Sequelize.literal(`
-            CASE
-              WHEN "senderId" = ${userId} THEN "receiverId"
-              ELSE "senderId"
-            END
-          `),
-          "otherUserId",
-        ],
-        [Sequelize.fn("MAX", Sequelize.col("createdAt")), "lastAt"],
-      ],
-      where: {
-        [Op.or]: [{ senderId: userId }, { receiverId: userId }],
-      },
-      group: ["otherUserId"],
-      order: [[Sequelize.literal("lastAt"), "DESC"]],
-      limit,
-      offset,
-      raw: true,
-    });
-
-    console.log("[CONVERSATIONS FOUND]", conversations.length);
-
-    if (!conversations.length)
-      return paginatedResponse(res, "Chat list fetched", [], 0, page, limit);
-
-    const otherIds = conversations.map((c) => c.otherUserId);
-
-    const users = await User.findAll({
-      where: { id: otherIds },
-      attributes: ["id", "name", "email", "profileImage"],
-    });
-
-    const userMap = Object.fromEntries(users.map((u) => [u.id, u]));
-
-    const unreadCounts = await Message.findAll({
-      attributes: ["senderId", [Sequelize.fn("COUNT", "*"), "count"]],
-      where: {
-        receiverId: userId,
-        senderId: otherIds,
-        isRead: false,
-      },
-      group: ["senderId"],
-      raw: true,
-    });
-
-    const unreadMap = Object.fromEntries(
-      unreadCounts.map((u) => [u.senderId, u.count]),
-    );
-
-    const chatList = conversations.map((c) => ({
-      withUser: userMap[c.otherUserId] || { id: c.otherUserId },
-      unreadCount: unreadMap[c.otherUserId] || 0,
-      lastAt: c.lastAt,
-    }));
+    const { page, limit } = parsePagination(req);
+    const result = await chatService.getChatList({ userId, page, limit });
 
     return paginatedResponse(
       res,
-      "Chat list fetched",
-      chatList,
-      chatList.length,
-      page,
-      limit,
+      'Chat list fetched',
+      result.items,
+      result.total,
+      result.page,
+      result.limit,
     );
-  } catch (err) {
-    console.error("[CHAT LIST ERROR]", err);
-    return sendResponse(res, 500, false, "Server error");
+  } catch (error) {
+    console.error('[CHAT LIST ERROR]', error);
+    return sendResponse(res, 500, false, 'Server error');
   }
 };
 
-/* ================= MARK AS READ ================= */
-
+/**
+ * Marks all unread messages from the target user as read.
+ *
+ * @param {import('express').Request} req - Express request.
+ * @param {import('express').Response} res - Express response.
+ * @returns {Promise<import('express').Response>} API response.
+ */
 exports.markAsRead = async (req, res) => {
   try {
     const userId = Number(req.user?.id);
     const { conversationWith } = req.body;
 
-    console.log("[MARK AS READ]", { userId, conversationWith });
+    if (!userId) {
+      return sendResponse(res, 401, false, 'Unauthorized');
+    }
 
-    if (!userId) return sendResponse(res, 401, false, "Unauthorized");
-    if (!conversationWith)
-      return sendResponse(res, 400, false, "conversationWith required");
+    if (!conversationWith) {
+      return sendResponse(res, 400, false, 'conversationWith required');
+    }
 
-    const [updated] = await Message.update(
-      { isRead: true },
-      {
-        where: {
-          senderId: conversationWith,
-          receiverId: userId,
-          isRead: false,
-        },
-      },
-    );
+    const result = await chatService.markConversationRead({
+      userId,
+      conversationWith,
+    });
 
-    console.log("[MESSAGES MARKED READ]", updated);
-
-    return sendResponse(res, 200, true, "Messages marked as read", { updated });
-  } catch (err) {
-    console.error("[MARK AS READ ERROR]", err);
-    return sendResponse(res, 500, false, "Server error");
+    return sendResponse(res, 200, true, 'Messages marked as read', result);
+  } catch (error) {
+    console.error('[MARK AS READ ERROR]', error);
+    return sendResponse(res, 500, false, 'Server error');
   }
 };

@@ -1,15 +1,57 @@
 const jwt = require("jsonwebtoken");
 const { processLiveLocation } = require("./services/liveLocationService");
+const chatService = require("./services/chatService");
 
 let io = null;
 
-// userId -> socketId
+// userId -> Set(socketId)
 const onlineUsers = new Map();
 
 // throttling map: userId -> last processed timestamp
 const liveLocationThrottle = new Map();
 
 const LIVE_LOCATION_MIN_INTERVAL_MS = 5000;
+
+const addSocketForUser = (userId, socketId) => {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId) return;
+
+  const currentSockets = onlineUsers.get(normalizedUserId) || new Set();
+  currentSockets.add(socketId);
+  onlineUsers.set(normalizedUserId, currentSockets);
+};
+
+const removeSocketForUser = (userId, socketId) => {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId) return;
+
+  const currentSockets = onlineUsers.get(normalizedUserId);
+  if (!currentSockets) return;
+
+  currentSockets.delete(socketId);
+
+  if (!currentSockets.size) {
+    onlineUsers.delete(normalizedUserId);
+    return;
+  }
+
+  onlineUsers.set(normalizedUserId, currentSockets);
+};
+
+const emitToUser = (userId, eventName, payload, options = {}) => {
+  const normalizedUserId = String(userId || "").trim();
+  if (!io || !normalizedUserId) return;
+
+  const socketIds = onlineUsers.get(normalizedUserId);
+  if (!socketIds || !socketIds.size) return;
+
+  for (const socketId of socketIds) {
+    if (options.excludeSocketId && socketId === options.excludeSocketId) {
+      continue;
+    }
+    io.to(socketId).emit(eventName, payload);
+  }
+};
 
 module.exports = {
   init: (server) => {
@@ -22,19 +64,18 @@ module.exports = {
       },
     });
 
-    // Socket authentication middleware
     io.use((socket, next) => {
       try {
         const token =
-        socket.handshake.headers?.authorization?.replace("Bearer ", "") ||
-          socket.handshake.auth?.token ;
+          socket.handshake.headers?.authorization?.replace("Bearer ", "") ||
+          socket.handshake.auth?.token;
+
         if (!token) {
           return next(new Error("Unauthorized: No token provided"));
         }
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-        socket.user = decoded; // { id, email, role, ... }
+        socket.user = decoded;
         next();
       } catch (error) {
         console.error("[SOCKET AUTH ERROR]", error.message);
@@ -43,104 +84,89 @@ module.exports = {
     });
 
     io.on("connection", (socket) => {
+      const resolvedUserId = String(socket.user?.id || "").trim();
+
       console.log("🟢 Socket connected:", {
         socketId: socket.id,
-        userId: socket.user?.id,
+        userId: resolvedUserId || null,
       });
 
-      const resolvedUserId = String(socket.user?.id || "");
-
       if (resolvedUserId) {
-        onlineUsers.set(resolvedUserId, socket.id);
+        addSocketForUser(resolvedUserId, socket.id);
         socket.userId = resolvedUserId;
-
-        console.log("👤 User auto-registered:", {
-          userId: resolvedUserId,
-          socketId: socket.id,
-        });
-      } else {
-        console.log("[AUTO-REGISTER] userId missing from auth token");
       }
 
-      /**
-       * REGISTER USER
-       * optional for chat presence mapping
-       */
       socket.on("register", ({ userId } = {}) => {
-        const resolvedUserId = String(socket.user?.id || userId || "");
-
-        console.log("[REGISTER] payload:", {
-          payloadUserId: userId,
-          authUserId: socket.user?.id,
-          resolvedUserId,
-        });
-
-        if (!resolvedUserId) {
-          console.log("[REGISTER] userId missing");
+        const finalUserId = String(socket.user?.id || userId || "").trim();
+        if (!finalUserId) {
           return;
         }
 
-        onlineUsers.set(resolvedUserId, socket.id);
-        socket.userId = resolvedUserId;
-
-        console.log("👤 User registered:", resolvedUserId);
+        addSocketForUser(finalUserId, socket.id);
+        socket.userId = finalUserId;
       });
 
-      /**
-       * JOIN CHAT ROOM
-       */
       socket.on("join-room", ({ roomId }) => {
-        console.log("[JOIN-ROOM] payload:", { roomId });
-
         if (!roomId) {
-          console.log("[JOIN-ROOM] roomId missing");
           return;
         }
 
         socket.join(String(roomId));
-        console.log(`📥 Socket ${socket.id} joined room ${roomId}`);
       });
 
-      /**
-       * SEND MESSAGE
-       */
-      socket.on("send-message", async ({ roomId, senderId, message }) => {
-        console.log("[SEND-MESSAGE] payload:", {
-          roomId,
-          senderId,
-          message,
-        });
-
-        if (!roomId || !senderId || !message) {
-          console.log("[SEND-MESSAGE] validation failed", {
-            hasRoomId: !!roomId,
-            hasSenderId: !!senderId,
-            hasMessage: !!message,
-          });
-          return;
-        }
-
-        const payload = {
-          roomId,
-          senderId,
-          message,
-          createdAt: new Date(),
-        };
-
-        io.to(String(roomId)).emit("receive-message", payload);
-
+      socket.on("send-message", async (payload = {}, ack) => {
         try {
-          const db = require("./config/db");
+          const senderId = Number(socket.user?.id || payload.senderId);
+          const receiverId = Number(payload.receiverId || payload.roomId);
+          const message = String(payload.message || "").trim();
 
-          await db.execute(
-            `INSERT INTO messages (room_id, sender_id, message)
-             VALUES (?, ?, ?)`,
-            [roomId, senderId, message],
-          );
+          if (!senderId || !receiverId || !message) {
+            const response = {
+              success: false,
+              message: "receiverId and message are required",
+            };
 
-          console.log("[DB] message insert success");
-        } catch (err) {
-          console.error("❌ MySQL insert failed:", err.message);
+            if (typeof ack === "function") ack(response);
+            return;
+          }
+          console.log("[SOCKET MESSAGE RECEIVED]", {
+            senderId,
+            receiverId,
+            preview: message.substring(0, 60),
+          });
+
+          const savedMessage = await chatService.sendDirectMessage({
+            senderId,
+            receiverId,
+            message,
+          });
+
+          emitToUser(receiverId, "receive-message", savedMessage, {
+            excludeSocketId: socket.id,
+          });
+
+          emitToUser(senderId, "receive-message", savedMessage, {
+            excludeSocketId: socket.id,
+          });
+
+          if (typeof ack === "function") {
+            ack({
+              success: true,
+              data: savedMessage,
+            });
+          }
+        } catch (error) {
+          console.error("[SEND MESSAGE SOCKET ERROR]", {
+            message: error.message,
+            stack: error.stack,
+          });
+
+          if (typeof ack === "function") {
+            ack({
+              success: false,
+              message: error.message || "Failed to send message",
+            });
+          }
         }
       });
 
@@ -153,29 +179,15 @@ module.exports = {
         });
       });
 
-      /**
-       * LIVE LOCATION UPDATE
-       * payload: { latitude, longitude }
-       */
       socket.on("live-location:update", async (payload = {}, ack) => {
         try {
           const tradesmanId = socket.user?.id;
           const { latitude, longitude } = payload;
 
-          console.log("[LIVE SOCKET] Event received", {
-            tradesmanId,
-            latitude,
-            longitude,
-            at: new Date().toISOString(),
-          });
-
           if (!tradesmanId) {
-            const response = {
-              success: false,
-              message: "Unauthorized socket user",
-            };
-
-            if (typeof ack === "function") ack(response);
+            if (typeof ack === "function") {
+              ack({ success: false, message: "Unauthorized socket user" });
+            }
             return;
           }
 
@@ -185,12 +197,12 @@ module.exports = {
             longitude === undefined ||
             longitude === null
           ) {
-            const response = {
-              success: false,
-              message: "latitude and longitude are required",
-            };
-
-            if (typeof ack === "function") ack(response);
+            if (typeof ack === "function") {
+              ack({
+                success: false,
+                message: "latitude and longitude are required",
+              });
+            }
             return;
           }
 
@@ -198,16 +210,15 @@ module.exports = {
           const lng = Number(longitude);
 
           if (Number.isNaN(lat) || Number.isNaN(lng)) {
-            const response = {
-              success: false,
-              message: "latitude and longitude must be valid numbers",
-            };
-
-            if (typeof ack === "function") ack(response);
+            if (typeof ack === "function") {
+              ack({
+                success: false,
+                message: "latitude and longitude must be valid numbers",
+              });
+            }
             return;
           }
 
-          // basic throttling
           const lastProcessedAt = liveLocationThrottle.get(String(tradesmanId));
           const now = Date.now();
 
@@ -215,13 +226,13 @@ module.exports = {
             lastProcessedAt &&
             now - lastProcessedAt < LIVE_LOCATION_MIN_INTERVAL_MS
           ) {
-            const response = {
-              success: true,
-              skipped: true,
-              reason: "THROTTLED",
-            };
-
-            if (typeof ack === "function") ack(response);
+            if (typeof ack === "function") {
+              ack({
+                success: true,
+                skipped: true,
+                reason: "THROTTLED",
+              });
+            }
             return;
           }
 
@@ -233,16 +244,8 @@ module.exports = {
             longitude: lng,
           });
 
-          console.log("[LIVE SOCKET] Location processed", {
-            tradesmanId,
-            result,
-          });
-
           if (typeof ack === "function") {
-            ack({
-              success: true,
-              data: result,
-            });
+            ack({ success: true, data: result });
           }
         } catch (error) {
           console.error("[LIVE SOCKET ERROR]", {
@@ -251,17 +254,14 @@ module.exports = {
           });
 
           if (typeof ack === "function") {
-            ack({
-              success: false,
-              message: error.message,
-            });
+            ack({ success: false, message: error.message });
           }
         }
       });
 
       socket.on("disconnect", () => {
         if (socket.userId) {
-          onlineUsers.delete(socket.userId);
+          removeSocketForUser(socket.userId, socket.id);
           liveLocationThrottle.delete(socket.userId);
           console.log("🔴 User disconnected:", socket.userId);
         } else {
@@ -278,139 +278,6 @@ module.exports = {
     return io;
   },
 
-  getOnlineUsers: () => {
-    return onlineUsers;
-  },
+  getOnlineUsers: () => onlineUsers,
+  emitToUser,
 };
-
-// let io = null;
-
-// // userId -> socketId
-// const onlineUsers = new Map();
-
-// module.exports = {
-//   init: (server) => {
-//     const { Server } = require("socket.io");
-
-//     io = new Server(server, {
-//       cors: {
-//         origin: "*",
-//         methods: ["GET", "POST"],
-//       },
-//     });
-
-//     io.on("connection", (socket) => {
-//       console.log("🟢 Socket connected:", socket.id);
-
-//       /**
-//        * REGISTER USER
-//        * payload: { userId }
-//        */
-//       socket.on("register", ({ userId }) => {
-//         console.log("[REGISTER] payload:", { userId });
-
-//         if (!userId) {
-//           console.log("[REGISTER] userId missing");
-//           return;
-//         }
-
-//         onlineUsers.set(String(userId), socket.id);
-//         socket.userId = String(userId);
-
-//         console.log("👤 User registered:", userId);
-//       });
-
-//       /**
-//        * JOIN CHAT ROOM
-//        * payload: { roomId }
-//        */
-//       socket.on("join-room", ({ roomId }) => {
-//         console.log("[JOIN-ROOM] payload:", { roomId });
-
-//         if (!roomId) {
-//           console.log("[JOIN-ROOM] roomId missing");
-//           return;
-//         }
-
-//         socket.join(String(roomId));
-//         console.log(`📥 Socket ${socket.id} joined room ${roomId}`);
-//       });
-
-//       /**
-//        * SEND MESSAGE
-//        * payload: { roomId, senderId, message }
-//        */
-//       socket.on("send-message", async ({ roomId, senderId, message }) => {
-//         console.log("[SEND-MESSAGE] payload:", {
-//           roomId,
-//           senderId,
-//           message,
-//         });
-
-//         if (!roomId || !senderId || !message) {
-//           console.log("[SEND-MESSAGE] validation failed", {
-//             hasRoomId: !!roomId,
-//             hasSenderId: !!senderId,
-//             hasMessage: !!message,
-//           });
-//           return;
-//         }
-
-//         const payload = {
-//           roomId,
-//           senderId,
-//           message,
-//           createdAt: new Date(),
-//         };
-
-//         // emit to all users in room
-//         console.log("[RECEIVE-MESSAGE] emitting to room:", String(roomId), payload);
-//         io.to(String(roomId)).emit("receive-message", payload);
-
-//         // save to DB
-//         try {
-//           console.log("[DB] loading ./config/db");
-//           const db = require("./config/db");
-
-//           console.log("[DB] object info:", {
-//             type: typeof db,
-//             hasExecute: typeof db.execute === "function",
-//           });
-
-//           const result = await db.execute(
-//             `INSERT INTO messages (room_id, sender_id, message)
-//              VALUES (?, ?, ?)`,
-//             [roomId, senderId, message]
-//           );
-
-//           console.log("[DB] insert success:", result);
-//         } catch (err) {
-//           console.error("❌ MySQL insert failed:", err.message);
-//         }
-//       });
-
-//       /**
-//        * DISCONNECT
-//        */
-//       socket.on("disconnect", () => {
-//         if (socket.userId) {
-//           onlineUsers.delete(socket.userId);
-//           console.log("🔴 User disconnected:", socket.userId);
-//         } else {
-//           console.log("🔴 Socket disconnected:", socket.id);
-//         }
-//       });
-//     });
-//   },
-
-//   getIO: () => {
-//     if (!io) {
-//       throw new Error("Socket.io not initialized");
-//     }
-//     return io;
-//   },
-
-//   getOnlineUsers: () => {
-//     return onlineUsers;
-//   },
-// };

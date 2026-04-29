@@ -4,33 +4,54 @@ const router = express.Router();
 const { saveDeviceToken } = require("../models/deviceTokenModel");
 const { verifyToken } = require("../middlewares/authMiddleware");
 
+/**
+ * Save the authenticated user's Firebase device token.
+ *
+ * Notes:
+ * - Keeps route-level logs for easier request tracing
+ * - Trims the incoming token before saving
+ * - Relies on the model helper to avoid duplicate token rows
+ *
+ * @route POST /save-token
+ * @access Private
+ */
 router.post("/save-token", verifyToken, async (req, res) => {
   try {
     const userId = req.user.id;
     const { token } = req.body;
 
     if (!token || !token.trim()) {
+      console.log("[SAVE TOKEN VALIDATION FAILED]", {
+        userId,
+        reason: "Token is required",
+      });
+
       return res.status(400).json({
         success: false,
         message: "Token is required",
       });
     }
 
-    await saveDeviceToken(userId, token.trim());
+    const sanitizedToken = token.trim();
+
+    await saveDeviceToken(userId, sanitizedToken);
 
     console.log("[DEVICE TOKEN SAVED]", {
       userId,
-      token: token.substring(0, 20) + "...",
+      token: sanitizedToken.substring(0, 20) + "...",
     });
 
-    res.json({
+    return res.json({
       success: true,
       message: "Device token saved successfully",
     });
   } catch (error) {
-    console.error("[SAVE TOKEN ERROR]", error.message);
+    console.error("[SAVE TOKEN ERROR]", {
+      message: error.message,
+      stack: error.stack,
+    });
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to save device token",
     });

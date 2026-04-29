@@ -2,8 +2,86 @@ const admin = require("../utils/firebase");
 const {
   getTokensByUser,
   saveDeviceToken,
+  deleteDeviceTokens,
+  normalizeDeviceToken,
 } = require("../models/deviceTokenModel");
 
+/**
+ * Firebase error codes that mean a device token is permanently unusable and
+ * should be removed from the database immediately.
+ */
+const INVALID_FCM_TOKEN_CODES = new Set([
+  "messaging/registration-token-not-registered",
+  "messaging/invalid-registration-token",
+]);
+
+/**
+ * Converts arbitrary payload values into strings because FCM data fields only
+ * support string values.
+ *
+ * @param {Record<string, unknown>} data - Raw push payload.
+ * @returns {Record<string, string>} String-only push payload.
+ */
+const buildStringDataPayload = (data = {}) => {
+  const stringData = {};
+
+  Object.keys(data).forEach((key) => {
+    stringData[key] = String(data[key] ?? "");
+  });
+
+  return stringData;
+};
+
+/**
+ * Builds the outbound FCM message for a single target token.
+ *
+ * @param {string} deviceToken - Firebase registration token.
+ * @param {string} title - Notification title.
+ * @param {string} body - Notification body.
+ * @param {Record<string, string>} data - String-only data payload.
+ * @returns {import('firebase-admin').messaging.Message} Firebase message.
+ */
+const buildPushMessage = (deviceToken, title, body, data) => ({
+  token: deviceToken,
+  notification: {
+    title,
+    body,
+  },
+  data: {
+    ...data,
+    click_action: "FLUTTER_NOTIFICATION_CLICK",
+  },
+  android: {
+    priority: "high",
+    notification: {
+      channelId: "high_importance_channel",
+      sound: "notification_sound",
+    },
+  },
+  apns: {
+    headers: {
+      "apns-priority": "10",
+    },
+    payload: {
+      aps: {
+        sound: "default",
+      },
+    },
+  },
+});
+
+/**
+ * Sends a push notification to all currently known device tokens for a user.
+ *
+ * Dead Firebase tokens are removed automatically so they are not retried on
+ * every future notification.
+ *
+ * @param {number} userId - Target user ID.
+ * @param {string} title - Notification title.
+ * @param {string} body - Notification body.
+ * @param {Record<string, unknown>} [data={}] - Additional push data.
+ * @returns {Promise<{success: boolean, reason: string | null, sentCount: number, failureCount: number, removedInvalidTokenCount?: number}>}
+ */
 const sendPushNotification = async (userId, title, body, data = {}) => {
   try {
     console.log("[PUSH] Starting push notification", {
@@ -19,8 +97,8 @@ const sendPushNotification = async (userId, title, body, data = {}) => {
     console.log("[PUSH] Tokens fetched", {
       userId,
       tokenCount: tokens ? tokens.length : 0,
-      tokensPreview: (tokens || []).map((t) =>
-        t.token ? `${t.token.substring(0, 15)}...` : null,
+      tokensPreview: (tokens || []).map((tokenRecord) =>
+        tokenRecord.token ? `${tokenRecord.token.substring(0, 15)}...` : null,
       ),
     });
 
@@ -35,12 +113,13 @@ const sendPushNotification = async (userId, title, body, data = {}) => {
         reason: "NO_TOKENS",
         sentCount: 0,
         failureCount: 0,
+        removedInvalidTokenCount: 0,
       };
     }
 
     const registrationTokens = tokens
-      .map((t) => t.token)
-      .filter((token) => token && token.trim().length > 0);
+      .map((tokenRecord) => normalizeDeviceToken(tokenRecord.token))
+      .filter(Boolean);
 
     console.log("[PUSH] Valid tokens prepared", {
       userId,
@@ -48,80 +127,62 @@ const sendPushNotification = async (userId, title, body, data = {}) => {
     });
 
     if (!registrationTokens.length) {
-      console.log("[PUSH] No valid tokens after filtering", {
-        userId,
-      });
+      console.log("[PUSH] No valid tokens after filtering", { userId });
 
       return {
         success: false,
         reason: "NO_VALID_TOKENS",
         sentCount: 0,
         failureCount: 0,
+        removedInvalidTokenCount: 0,
       };
     }
 
-    const stringData = {};
-    Object.keys(data).forEach((key) => {
-      stringData[key] = String(data[key] ?? "");
-    });
-
+    const stringData = buildStringDataPayload(data);
+    const invalidTokensToDelete = new Set();
     let successCount = 0;
     let failureCount = 0;
 
     for (const deviceToken of registrationTokens) {
       try {
-        const message = {
-          token: deviceToken,
-
-          notification: {
-            title,
-            body,
-          },
-
-          data: {
-            ...stringData,
-            click_action: "FLUTTER_NOTIFICATION_CLICK",
-          },
-
-          android: {
-            priority: "high",
-            notification: {
-              channelId: "high_importance_channel",
-              sound: "notification_sound"
-            },
-          },
-
-          apns: {
-            headers: {
-              "apns-priority": "10",
-            },
-            payload: {
-              aps: {
-                sound: "default",
-              },
-            },
-          },
-        };
-
+        const message = buildPushMessage(deviceToken, title, body, stringData);
         const response = await admin.messaging().send(message);
 
         successCount++;
 
         console.log("[PUSH SUCCESS]", {
           userId,
-          token: deviceToken.substring(0, 15) + "...",
+          token: `${deviceToken.substring(0, 15)}...`,
           messageId: response,
         });
-      } catch (err) {
+      } catch (error) {
         failureCount++;
 
         console.error("[PUSH FAILURE]", {
           userId,
-          token: deviceToken.substring(0, 15) + "...",
-          error: err.message,
-          code: err.code,
+          token: `${deviceToken.substring(0, 15)}...`,
+          error: error.message,
+          code: error.code,
         });
+
+        if (INVALID_FCM_TOKEN_CODES.has(error.code)) {
+          invalidTokensToDelete.add(deviceToken);
+        }
       }
+    }
+
+    let removedInvalidTokenCount = 0;
+
+    if (invalidTokensToDelete.size) {
+      removedInvalidTokenCount = await deleteDeviceTokens([...invalidTokensToDelete]);
+
+      console.log("[PUSH CLEANUP] Removed invalid device tokens", {
+        userId,
+        removedInvalidTokenCount,
+        removedTokensPreview: [...invalidTokensToDelete].map(
+          (deviceToken) => `${deviceToken.substring(0, 15)}...`
+        ),
+      });
     }
 
     return {
@@ -129,8 +190,8 @@ const sendPushNotification = async (userId, title, body, data = {}) => {
       reason: successCount > 0 ? null : "ALL_PUSHES_FAILED",
       sentCount: successCount,
       failureCount,
+      removedInvalidTokenCount,
     };
-
   } catch (error) {
     console.error("[PUSH ERROR] Push crashed", {
       userId,
@@ -144,22 +205,32 @@ const sendPushNotification = async (userId, title, body, data = {}) => {
       reason: error.message || "PUSH_SEND_FAILED",
       sentCount: 0,
       failureCount: 0,
+      removedInvalidTokenCount: 0,
     };
   }
 };
 
+/**
+ * Saves the current device token for the authenticated user.
+ *
+ * @param {import('express').Request} req - Express request.
+ * @param {import('express').Response} res - Express response.
+ * @returns {Promise<import('express').Response>} JSON result.
+ */
 const saveMyDeviceToken = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { token } = req.body;
+    const normalizedToken = normalizeDeviceToken(req.body?.token);
 
     console.log("[TOKEN] Save request received", {
       userId,
-      hasToken: !!token,
-      tokenPreview: token ? `${token.substring(0, 15)}...` : null,
+      hasToken: !!normalizedToken,
+      tokenPreview: normalizedToken
+        ? `${normalizedToken.substring(0, 15)}...`
+        : null,
     });
 
-    if (!token || !token.trim()) {
+    if (!normalizedToken) {
       console.log("[TOKEN] Token missing", { userId });
 
       return res.status(400).json({
@@ -168,11 +239,11 @@ const saveMyDeviceToken = async (req, res) => {
       });
     }
 
-    await saveDeviceToken(userId, token.trim());
+    await saveDeviceToken(userId, normalizedToken);
 
     console.log("[TOKEN] Token saved successfully", {
       userId,
-      tokenPreview: `${token.substring(0, 15)}...`,
+      tokenPreview: `${normalizedToken.substring(0, 15)}...`,
       at: new Date().toISOString(),
     });
 
