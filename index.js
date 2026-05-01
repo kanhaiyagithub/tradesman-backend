@@ -1,10 +1,11 @@
-const http = require("http");
-const dotenv = require("dotenv");
-const app = require("./app");
-const socket = require("./socket");
+const http = require('http');
+const dotenv = require('dotenv');
 
-// dotenv.config({ path: "./config/config.env" });
+// dotenv.config({ path: './config/config.env' });
 dotenv.config();
+
+const app = require('./app');
+const socket = require('./socket');
 
 const server = http.createServer(app);
 socket.init(server);

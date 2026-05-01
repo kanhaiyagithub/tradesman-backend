@@ -5,6 +5,10 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
+    "db:check": "node scripts/dbCheck.js",
+    "db:migrate": "node scripts/migrate.js up",
+    "db:migrate:down": "node scripts/migrate.js down",
+    "db:migrate:status": "node scripts/migrate.js status",
     "chat:backfill": "node scripts/backfillConversations.js",
     "chat:backfill:dry": "node scripts/backfillConversations.js --dry-run",
     "chat:migrate:conversation-id:dry": "node scripts/migrateMessageConversationIds.js --dry-run",
@@ -28,7 +32,8 @@
     "sequelize": "^6.37.7",
     "sharp": "^0.34.5",
     "socket.io": "^4.8.1",
-    "stripe": "^20.4.0"
+    "stripe": "^20.4.0",
+    "umzug": "^3.8.2"
   },
   "devDependencies": {
     "nodemon": "^2.0.22"
