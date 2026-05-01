@@ -2,6 +2,7 @@
 const Hire = require("../models/hireModel");
 const User = require("../models/User");
 const { Op } = require("sequelize");
+const storageService = require("../services/storage/storageService");
 
 const sendResponse = (res, status, success, message, data = null) =>
   res.status(status).json({ success, message, data });
@@ -36,7 +37,14 @@ exports.getClientBookings = async (req, res) => {
     // UI friendly mapping
     const mapped = bookings.map((job) => ({
       hireId: job.id,
-      tradesman: job.tradesman,
+      tradesman: job.tradesman
+        ? {
+            ...job.tradesman.toJSON(),
+            profileImage: storageService.toPublicUrl(job.tradesman.profileImage, {
+              category: "profile",
+            }),
+          }
+        : null,
       status: job.status,
       jobDescription: job.jobDescription,
       createdAt: job.createdAt,

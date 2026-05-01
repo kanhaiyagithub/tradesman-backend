@@ -1,93 +1,93 @@
-const multer = require("multer");
-const sharp = require("sharp");
-const path = require("path");
-const fs = require("fs");
+const multer = require('multer');
+const sharp = require('sharp');
+const { resolveStorageCategory } = require('../services/storage/helpers/storagePath');
 
-/* ================================
-   Ensure upload folders exist
-================================ */
-const ensureDir = dir => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-};
-
-ensureDir("uploads/profile");
-ensureDir("uploads/portfolio");
-ensureDir("uploads/license");
-
-/* ================================
-   Multer config (memory storage)
-================================ */
+/**
+ * Shared in-memory upload middleware.
+ *
+ * Why memory storage:
+ * - validation happens before persistence
+ * - image transformation happens in memory
+ * - the storage provider decides the final backend (local now, S3 later)
+ */
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
+  limits: { fileSize: 2 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowedMimeTypes = [
-      "image/jpeg",
-      "image/jpg",
-      "image/png"
-    ];
+    const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png'];
 
     if (allowedMimeTypes.includes(file.mimetype)) {
       cb(null, true);
-    } else {
-      cb(null, false); // ❌ silently reject
-      req.fileValidationError =
-        "Invalid image format. Allowed formats: JPG, JPEG, PNG.";
+      return;
     }
-  }
+
+    cb(null, false);
+    req.fileValidationError =
+      'Invalid image format. Allowed formats: JPG, JPEG, PNG.';
+  },
 });
 
-/* ================================
-   Convert image → JPG
-================================ */
+/**
+ * Converts uploaded images to JPEG in memory and annotates files with the
+ * metadata required by the storage service.
+ *
+ * Controllers stay storage-agnostic by consuming:
+ * - `file.processedBuffer`
+ * - `file.processedMimeType`
+ * - `file.processedExtension`
+ * - `file.storageCategory`
+ */
 const convertToJpg = async (req, res, next) => {
-  // ❌ Wrong file format
   if (req.fileValidationError) {
     return res.status(400).json({
       success: false,
-      message: req.fileValidationError
+      message: req.fileValidationError,
     });
   }
 
   try {
-    if (!req.files && !req.file) return next();
+    if (!req.files && !req.file) {
+      return next();
+    }
 
     const files = [];
 
-    if (req.file) files.push(req.file);
+    if (req.file) {
+      files.push(req.file);
+    }
+
     if (req.files) {
-      Object.values(req.files).forEach(arr => files.push(...arr));
+      if (Array.isArray(req.files)) {
+        files.push(...req.files);
+      } else {
+        Object.values(req.files).forEach((value) => {
+          if (Array.isArray(value)) {
+            files.push(...value);
+          }
+        });
+      }
     }
 
     for (const file of files) {
-      let folder = "uploads";
-
-      if (file.fieldname === "profileImage") folder = "uploads/profile";
-      if (file.fieldname === "portfolioPhotos") folder = "uploads/portfolio";
-      if (file.fieldname === "licenseDocument") folder = "uploads/license";
-
-      const filename = `${file.fieldname}-${Date.now()}.jpg`;
-      const filepath = path.join(folder, filename);
-
-      await sharp(file.buffer)
+      file.processedBuffer = await sharp(file.buffer)
         .jpeg({ quality: 90 })
-        .toFile(filepath);
-
-      // 🔥 overwrite filename so controller unchanged rahe
-      file.filename = filename;
+        .toBuffer();
+      file.processedMimeType = 'image/jpeg';
+      file.processedExtension = 'jpg';
+      file.storageCategory = resolveStorageCategory(file.fieldname);
     }
 
-    next();
+    return next();
   } catch (error) {
-    console.error("Image processing error:", error);
+    console.error('Image processing error:', error);
     return res.status(400).json({
       success: false,
-      message: "Invalid image file"
+      message: 'Invalid image file',
     });
   }
 };
 
 module.exports = {
   upload,
-  convertToJpg
+  convertToJpg,
 };

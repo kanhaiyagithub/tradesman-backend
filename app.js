@@ -4,6 +4,7 @@ const cors = require('cors');
 const session = require('express-session');
 const passport = require('passport');
 const path = require('path');
+const storageConfig = require('./config/storage');
 
 // dotenv.config({ path: './config/config.env' });
 dotenv.config();
@@ -53,7 +54,10 @@ app.use(express.json());
  * Phase 1A does not change file storage behavior. It only removes runtime
  * schema mutation from app startup.
  */
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use(
+  storageConfig.local.publicBasePath,
+  express.static(storageConfig.local.rootDir)
+);
 
 app.use(
   session({

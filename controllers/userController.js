@@ -4,6 +4,7 @@ const Hire = require("../models/hireModel");
 const Review = require("../models/reviewModel");
 const TravelPlan = require("../models/locationModel");
 const TradesType = require("../models/tradesTypeModel");
+const storageService = require("../services/storage/storageService");
 
 const DEFAULT_FILTER_RADIUS_KM = 15;
 
@@ -33,6 +34,99 @@ const sendResponse = (
   error = null,
 ) => {
   return res.status(statusCode).json({ success, message, data, error });
+};
+
+/**
+ * Resolves a stored profile image key or legacy value into a public URL.
+ *
+ * @param {string|null|undefined} value - Stored value from the database.
+ * @returns {string|null} Public URL.
+ */
+const toPublicProfileImage = (value) =>
+  storageService.toPublicUrl(value, { category: "profile" });
+
+/**
+ * Resolves a stored license document key or legacy value into a public URL.
+ *
+ * @param {string|null|undefined} value - Stored value from the database.
+ * @returns {string|null} Public URL.
+ */
+const toPublicLicenseDocument = (value) =>
+  storageService.toPublicUrl(value, { category: "license" });
+
+/**
+ * Resolves stored portfolio image keys or legacy values into public URLs.
+ *
+ * @param {string[]|null|undefined} values - Stored values from the database.
+ * @returns {string[]} Public URLs.
+ */
+const toPublicPortfolioPhotos = (values) =>
+  storageService.toPublicUrls(values, { category: "portfolio" });
+
+/**
+ * Normalizes user media fields for API responses without changing the database
+ * shape stored internally.
+ *
+ * @param {object|null|undefined} userPayload - Plain user payload.
+ * @returns {object|null} User payload with resolved media URLs.
+ */
+const serializeUserMedia = (userPayload) => {
+  if (!userPayload) {
+    return null;
+  }
+
+  return {
+    ...userPayload,
+    profileImage: toPublicProfileImage(userPayload.profileImage),
+  };
+};
+
+/**
+ * Normalizes tradesman media fields for API responses.
+ *
+ * @param {object|null|undefined} tradesmanPayload - Plain tradesman payload.
+ * @returns {object|null} Tradesman payload with resolved media URLs.
+ */
+const serializeTradesmanMedia = (tradesmanPayload) => {
+  if (!tradesmanPayload) {
+    return null;
+  }
+
+  return {
+    ...tradesmanPayload,
+    licenseDocument: toPublicLicenseDocument(tradesmanPayload.licenseDocument),
+    portfolioPhotos: toPublicPortfolioPhotos(tradesmanPayload.portfolioPhotos),
+  };
+};
+
+/**
+ * Normalizes nested user + tradesman responses.
+ *
+ * @param {object|null|undefined} payload - Plain API payload.
+ * @returns {object|null} Payload with resolved media URLs.
+ */
+const serializeUserWithTradesman = (payload) => {
+  if (!payload) {
+    return null;
+  }
+
+  const nextPayload = serializeUserMedia(payload);
+
+  if (nextPayload.TradesmanDetail) {
+    nextPayload.TradesmanDetail = serializeTradesmanMedia(
+      nextPayload.TradesmanDetail
+    );
+  }
+
+  if (nextPayload.tradesman) {
+    nextPayload.tradesman = serializeTradesmanMedia(nextPayload.tradesman);
+  }
+
+  if (nextPayload.user) {
+    nextPayload.user = serializeUserMedia(nextPayload.user);
+  }
+
+  return nextPayload;
 };
 
 const signToken = (user) => {
@@ -246,19 +340,31 @@ exports.register = async (req, res) => {
       resolvedTradeType = tradeRecord.name;
     }
 
-    // 4) User create (profileImage = filename)
+    const savedProfileImageKey = await storageService.saveSingleImage({
+      file: profileImageFile,
+      category: "profile",
+    });
+
+    // 4) User create (profileImage = normalized storage key)
     const user = await User.create({
       name,
       email,
       mobile,
       password: hashedPass,
       role,
-      profileImage: profileImageFile ? profileImageFile.filename : null,
+      profileImage: savedProfileImageKey,
     });
 
     // 5) TradesmanDetails create (licenseDocument + portfolioPhotos array)
     if (role === "tradesman") {
-      const portfolioPhotos = portfolioFiles.map((f) => f.filename);
+      const savedLicenseDocumentKey = await storageService.saveSingleImage({
+        file: licenseDocFile,
+        category: "license",
+      });
+      const portfolioPhotos = await storageService.saveMultipleImages({
+        files: portfolioFiles,
+        category: "portfolio",
+      });
 
       await TradesmanDetails.create({
         userId: user.id,
@@ -268,7 +374,7 @@ exports.register = async (req, res) => {
         shortBio,
         licenseNumber,
         licenseExpiry,
-        licenseDocument: licenseDocFile.filename,
+        licenseDocument: savedLicenseDocumentKey,
         portfolioPhotos,
         portfolioDescription,
       });
@@ -288,7 +394,13 @@ exports.register = async (req, res) => {
       // }
     }
 
-    return sendResponse(res, 201, true, "User registered successfully", user);
+    return sendResponse(
+      res,
+      201,
+      true,
+      "User registered successfully",
+      serializeUserMedia(user.toJSON())
+    );
   } catch (error) {
     console.error("Register Error:", error);
     return sendResponse(res, 500, false, "Server error");
@@ -364,6 +476,10 @@ exports.getAllUsers = async (req, res) => {
       order: [["createdAt", "DESC"]],
     });
 
+    result.rows = result.rows.map((row) =>
+      serializeUserWithTradesman(row.toJSON())
+    );
+
     return paginatedResponse(res, "Users fetched", result, page, limit);
   } catch (error) {
     console.error("Fetch Users Error:", error);
@@ -438,11 +554,11 @@ exports.getAllTradesmen = async (req, res) => {
     const formattedRows = result.rows.map((user) => {
       const userJson = user.toJSON();
 
-      return {
+      return serializeUserWithTradesman({
         ...userJson,
         tradeTypeId: userJson.TradesmanDetail?.tradeTypeId || null,
         tradeType: userJson.TradesmanDetail?.tradeType || null,
-      };
+      });
     });
 
     return res.status(200).json({
@@ -511,11 +627,17 @@ exports.getUserById = async (req, res) => {
 
     const userJson = user.toJSON();
 
-    return sendResponse(res, 200, true, "User fetched", {
-      ...userJson,
-      tradeTypeId: userJson.TradesmanDetail?.tradeTypeId || null,
-      tradeType: userJson.TradesmanDetail?.tradeType || null,
-    });
+    return sendResponse(
+      res,
+      200,
+      true,
+      "User fetched",
+      serializeUserWithTradesman({
+        ...userJson,
+        tradeTypeId: userJson.TradesmanDetail?.tradeTypeId || null,
+        tradeType: userJson.TradesmanDetail?.tradeType || null,
+      })
+    );
   } catch (error) {
     console.error("Fetch User Error:", error);
     return sendResponse(res, 500, false, "Server error");
@@ -554,7 +676,17 @@ exports.updateProfile = async (req, res) => {
 
     // 🖼 PROFILE IMAGE (OPTIONAL)
     if (req.file) {
-      user.profileImage = `/uploads/profile/${req.file.filename}`;
+      const previousProfileImage = user.profileImage;
+      user.profileImage = await storageService.saveSingleImage({
+        file: req.file,
+        category: "profile",
+      });
+
+      if (previousProfileImage && previousProfileImage !== user.profileImage) {
+        await storageService.deleteObject(previousProfileImage, {
+          category: "profile",
+        });
+      }
     }
 
     await user.save();
@@ -593,7 +725,7 @@ exports.updateProfile = async (req, res) => {
       name: user.name,
       email: user.email,
       mobile: user.mobile,
-      profileImage: user.profileImage,
+      profileImage: toPublicProfileImage(user.profileImage),
       tradesman: tradesman
         ? {
             tradeTypeId: tradesman.tradeTypeId,
@@ -723,11 +855,17 @@ exports.getMeProfile = async (req, res) => {
 
     const userJson = user.toJSON();
 
-    return sendResponse(res, 200, true, "User fetched", {
-      ...userJson,
-      tradeTypeId: userJson.TradesmanDetail?.tradeTypeId || null,
-      tradeType: userJson.TradesmanDetail?.tradeType || null,
-    });
+    return sendResponse(
+      res,
+      200,
+      true,
+      "User fetched",
+      serializeUserWithTradesman({
+        ...userJson,
+        tradeTypeId: userJson.TradesmanDetail?.tradeTypeId || null,
+        tradeType: userJson.TradesmanDetail?.tradeType || null,
+      })
+    );
   } catch (error) {
     console.error(error);
     return sendResponse(res, 500, false, "Server error");
@@ -813,7 +951,7 @@ exports.getFullUserProfile = async (req, res) => {
         /* PROFILE HEADER */
         id: user.id,
         name: user.name,
-        profileImage: user.profileImage,
+        profileImage: toPublicProfileImage(user.profileImage),
         tradeTypeId: user.TradesmanDetail?.tradeTypeId || null,
         tradeType: user.TradesmanDetail?.tradeType || null,
         description: user.TradesmanDetail?.shortBio || null,
@@ -1388,9 +1526,18 @@ exports.updateTradesmanProfile = async (req, res) => {
     if (name !== undefined) user.name = name;
     if (mobile !== undefined) user.mobile = mobile;
 
-    // ✅ ONLY filename (NO /uploads/)
-    if (profileImageFile?.filename) {
-      user.profileImage = profileImageFile.filename;
+    if (profileImageFile) {
+      const previousProfileImage = user.profileImage;
+      user.profileImage = await storageService.saveSingleImage({
+        file: profileImageFile,
+        category: "profile",
+      });
+
+      if (previousProfileImage && previousProfileImage !== user.profileImage) {
+        await storageService.deleteObject(previousProfileImage, {
+          category: "profile",
+        });
+      }
     }
 
     await user.save();
@@ -1420,9 +1567,19 @@ exports.updateTradesmanProfile = async (req, res) => {
 
     // ❌ licenseDocument update NOT allowed
 
-    // ✅ PORTFOLIO PHOTOS → ONLY filenames, NO stringify
     if (portfolioFiles.length > 0) {
-      tradesman.portfolioPhotos = portfolioFiles.map((f) => f.filename);
+      const previousPortfolioPhotos = Array.isArray(tradesman.portfolioPhotos)
+        ? [...tradesman.portfolioPhotos]
+        : [];
+
+      tradesman.portfolioPhotos = await storageService.saveMultipleImages({
+        files: portfolioFiles,
+        category: "portfolio",
+      });
+
+      await storageService.deleteObjects(previousPortfolioPhotos, {
+        category: "portfolio",
+      });
     }
 
     await tradesman.save();
@@ -1433,7 +1590,7 @@ exports.updateTradesmanProfile = async (req, res) => {
         id: user.id,
         name: user.name,
         mobile: user.mobile,
-        profileImage: user.profileImage, // e.g. "profileImage-176562030141.jpg"
+        profileImage: toPublicProfileImage(user.profileImage),
       },
       tradesman: {
         tradeTypeId: tradesman.tradeTypeId,
@@ -1443,7 +1600,7 @@ exports.updateTradesmanProfile = async (req, res) => {
         portfolioDescription: tradesman.portfolioDescription,
         licenseNumber: tradesman.licenseNumber,
         licenseExpiry: tradesman.licenseExpiry,
-        portfolioPhotos: tradesman.portfolioPhotos || [], // ["img1.jpg","img2.jpg"]
+        portfolioPhotos: toPublicPortfolioPhotos(tradesman.portfolioPhotos || []),
       },
     });
   } catch (error) {
@@ -1568,7 +1725,7 @@ exports.filterNearbyTradesmen = async (req, res) => {
         return {
           id: t.id,
           name: t.name,
-          profileImage: t.profileImage,
+          profileImage: toPublicProfileImage(t.profileImage),
           tradeTypeId: t.TradesmanDetail?.tradeTypeId || null,
           tradeType: t.TradesmanDetail?.tradeType || null,
           businessName: t.TradesmanDetail?.businessName || null,

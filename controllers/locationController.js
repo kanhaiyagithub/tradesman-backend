@@ -9,6 +9,7 @@ const UserSubscription = require("../models/UserSubscription");
 const Review = require("../models/reviewModel");
 
 const { Op, fn, col } = require("sequelize");
+const storageService = require("../services/storage/storageService");
 
 const { matchTravelPlanWithAlerts } = require("../services/travelAlertService");
 
@@ -634,7 +635,9 @@ exports.getTradesmanProfile = async (req, res) => {
 
       name: tradesman.name,
 
-      profileImage: tradesman.profileImage,
+      profileImage: storageService.toPublicUrl(tradesman.profileImage, {
+        category: "profile",
+      }),
 
       rating: ratingAgg?.avgRating
         ? Number(ratingAgg.avgRating).toFixed(1)

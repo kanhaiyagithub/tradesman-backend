@@ -1,7 +1,17 @@
 const TradesmanDetails = require("../models/TradesmanDetails");
+const storageService = require("../services/storage/storageService");
 
 const sendResponse = (res, status, success, message, data = null) =>
   res.status(status).json({ success, message, data });
+
+/**
+ * Resolves stored portfolio photo values into public URLs.
+ *
+ * @param {string[]} photos - Stored portfolio photo keys or legacy values.
+ * @returns {string[]} Publicly accessible URLs.
+ */
+const toPublicPortfolioPhotos = (photos = []) =>
+  storageService.toPublicUrls(photos, { category: "portfolio" });
 
 exports.addPortfolioPhotos = async (req, res) => {
   try {
@@ -12,25 +22,27 @@ exports.addPortfolioPhotos = async (req, res) => {
     }
 
     const tradesman = await TradesmanDetails.findOne({
-      where: { userId }
+      where: { userId },
     });
 
     if (!tradesman) {
       return sendResponse(res, 404, false, "Tradesman details not found");
     }
 
-    const existingPhotos = tradesman.portfolioPhotos || [];
+    const existingPhotos = Array.isArray(tradesman.portfolioPhotos)
+      ? tradesman.portfolioPhotos
+      : [];
 
     if (existingPhotos.length + req.files.length > 10) {
       return sendResponse(res, 400, false, "Max 10 portfolio photos allowed");
     }
 
-    // diskStorage already saved files
-    const newPhotos = req.files.map(
-      file => `/uploads/portfolio/${file.filename}`
-    );
+    const savedPhotos = await storageService.saveMultipleImages({
+      files: req.files,
+      category: "portfolio",
+    });
 
-    tradesman.portfolioPhotos = [...existingPhotos, ...newPhotos];
+    tradesman.portfolioPhotos = [...existingPhotos, ...savedPhotos];
     await tradesman.save();
 
     return sendResponse(
@@ -38,9 +50,8 @@ exports.addPortfolioPhotos = async (req, res) => {
       200,
       true,
       "Portfolio photos added",
-      tradesman.portfolioPhotos
+      toPublicPortfolioPhotos(tradesman.portfolioPhotos)
     );
-
   } catch (err) {
     console.error(err);
     return sendResponse(res, 500, false, "Server error");
@@ -52,7 +63,7 @@ exports.getMyPortfolio = async (req, res) => {
     const userId = req.user.id;
 
     const tradesman = await TradesmanDetails.findOne({
-      where: { userId }
+      where: { userId },
     });
 
     if (!tradesman) {
@@ -64,9 +75,8 @@ exports.getMyPortfolio = async (req, res) => {
       200,
       true,
       "Portfolio fetched",
-      tradesman.portfolioPhotos || []
+      toPublicPortfolioPhotos(tradesman.portfolioPhotos || [])
     );
-
   } catch (err) {
     return sendResponse(res, 500, false, "Server error");
   }
@@ -75,34 +85,36 @@ exports.getMyPortfolio = async (req, res) => {
 exports.deletePortfolioPhoto = async (req, res) => {
   try {
     const userId = req.user.id;
-    const index = parseInt(req.params.index);
+    const index = parseInt(req.params.index, 10);
 
     const tradesman = await TradesmanDetails.findOne({
-      where: { userId }
+      where: { userId },
     });
 
     if (!tradesman) {
       return sendResponse(res, 404, false, "Tradesman details not found");
     }
 
-    const photos = tradesman.portfolioPhotos || [];
+    const photos = Array.isArray(tradesman.portfolioPhotos)
+      ? [...tradesman.portfolioPhotos]
+      : [];
 
-    if (isNaN(index) || index < 0 || index >= photos.length) {
+    if (Number.isNaN(index) || index < 0 || index >= photos.length) {
       return sendResponse(res, 400, false, "Invalid photo index");
     }
 
-    photos.splice(index, 1);
+    const [removedPhoto] = photos.splice(index, 1);
     tradesman.portfolioPhotos = photos;
     await tradesman.save();
+    await storageService.deleteObject(removedPhoto, { category: "portfolio" });
 
     return sendResponse(
       res,
       200,
       true,
       "Portfolio photo deleted",
-      photos
+      toPublicPortfolioPhotos(photos)
     );
-
   } catch (err) {
     return sendResponse(res, 500, false, "Server error");
   }

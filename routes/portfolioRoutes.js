@@ -4,8 +4,7 @@ const router = express.Router();
 const portfolioController = require("../controllers/portfolioController");
 const { verifyToken } = require("../middlewares/authMiddleware");
 
-// ⚠️ upload.js returns multer instance DIRECTLY
-const upload = require("../middlewares/upload");
+const { upload, convertToJpg } = require("../middlewares/uploadMiddleware");
 
 // ===============================
 // ADD portfolio photos
@@ -13,7 +12,8 @@ const upload = require("../middlewares/upload");
 router.post(
   "/portfolioPhotos",
   verifyToken,
-  upload.array("photos", 10),   // 🔥 MUST be "photos"
+  upload.array("photos", 10),
+  convertToJpg,
   portfolioController.addPortfolioPhotos
 );
 

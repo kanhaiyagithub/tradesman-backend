@@ -9,6 +9,7 @@ const {
   buildMessagePreview,
 } = require('../utils/chatConversation');
 const { sendPushNotification } = require('../controllers/notificationController');
+const storageService = require('./storage/storageService');
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
@@ -62,7 +63,9 @@ const serializeChatUser = (user) => {
     name: user.name,
     email: user.email,
     role: user.role,
-    profileImage: user.profileImage,
+    profileImage: storageService.toPublicUrl(user.profileImage, {
+      category: 'profile',
+    }),
   };
 };
 
