@@ -1,3 +1,5 @@
+const { Op } = require("sequelize");
+
 exports.getFullUserProfile = async (req, res) => {
     try {
         const userId = req.params.id;
@@ -12,7 +14,10 @@ exports.getFullUserProfile = async (req, res) => {
                 {
                     model: TravelPlan,
                     as: "TravelPlans",
-                    where: { status: "open" },
+                    where: {
+                        status: { [Op.in]: ["open", "running"] },
+                        destinationDateTime: { [Op.gte]: new Date() },
+                    },
                     required: false,
                 },
             ],

@@ -12,6 +12,12 @@ const { Op, fn, col } = require("sequelize");
 const storageService = require("../services/storage/storageService");
 
 const { matchTravelPlanWithAlerts } = require("../services/travelAlertService");
+const {
+  TRAVEL_PLAN_STATUSES,
+  buildActiveOrUpcomingPlanWhere,
+  getStatusForTravelWindow,
+  refreshTravelPlanStatuses,
+} = require("../services/travelPlanStatusService");
 
 // ================= RESPONSE HELPER =================
 
@@ -247,6 +253,8 @@ exports.createTravelPlan = async (req, res) => {
       );
     }
 
+    const now = new Date();
+
     if (new Date(destinationDateTime) < new Date(startDateTime)) {
       return sendResponse(
         res,
@@ -256,6 +264,18 @@ exports.createTravelPlan = async (req, res) => {
         false,
 
         "destinationDateTime cannot be before startDateTime",
+      );
+    }
+
+    if (new Date(destinationDateTime) < now) {
+      return sendResponse(
+        res,
+
+        400,
+
+        false,
+
+        "destinationDateTime cannot be in the past",
       );
     }
 
@@ -281,20 +301,23 @@ exports.createTravelPlan = async (req, res) => {
       }
     }
 
-    const overlapPlan = await TravelPlan.findOne({
-      where: {
-        tradesmanId: userId,
+    await refreshTravelPlanStatuses({ tradesmanId: userId, now });
 
-        status: "open",
-
-        startDateTime: { [Op.lte]: destinationDateTime },
-
-        destinationDateTime: { [Op.gte]: startDateTime },
-      },
+    const existingPlan = await TravelPlan.findOne({
+      where: buildActiveOrUpcomingPlanWhere(userId, now),
+      order: [["startDateTime", "ASC"]],
     });
 
-    if (overlapPlan) {
-      return sendResponse(res, 400, false, "Active travel plan already exists");
+    if (existingPlan) {
+      return sendResponse(
+        res,
+
+        400,
+
+        false,
+
+        "You already have an active or upcoming travel plan",
+      );
     }
 
     const plan = await TravelPlan.create({
@@ -324,7 +347,7 @@ exports.createTravelPlan = async (req, res) => {
 
       stops: allowStops ? parsedStops : null,
 
-      status: "open",
+      status: getStatusForTravelWindow(startDateTime, destinationDateTime, now),
     });
 
     await matchTravelPlanWithAlerts(plan);
@@ -339,6 +362,8 @@ exports.createTravelPlan = async (req, res) => {
 
 exports.getMyTravelPlans = async (req, res) => {
   try {
+    await refreshTravelPlanStatuses({ tradesmanId: req.user.id });
+
     const plans = await TravelPlan.findAll({
       where: { tradesmanId: req.user.id },
 
@@ -373,14 +398,13 @@ exports.updateMyTravelPlan = async (req, res) => {
       );
     }
 
+    const now = new Date();
+
+    await refreshTravelPlanStatuses({ tradesmanId: userId, now });
+
     const plan = await TravelPlan.findOne({
-      where: {
-        tradesmanId: userId,
-
-        status: "open",
-
-        destinationDateTime: { [Op.gte]: new Date() },
-      },
+      where: buildActiveOrUpcomingPlanWhere(userId, now),
+      order: [["startDateTime", "ASC"]],
     });
 
     if (!plan) {
@@ -427,7 +451,13 @@ exports.updateMyTravelPlan = async (req, res) => {
 
     if (priceRange !== undefined) plan.priceRange = priceRange;
 
-    if (status !== undefined) plan.status = status;
+    if (status !== undefined) {
+      if (!TRAVEL_PLAN_STATUSES.includes(status)) {
+        return sendResponse(res, 400, false, "Invalid travel plan status");
+      }
+
+      plan.status = status;
+    }
 
     if (startDateTime !== undefined) plan.startDateTime = startDateTime;
 
@@ -562,6 +592,26 @@ exports.updateMyTravelPlan = async (req, res) => {
       );
     }
 
+    if (nextDestinationDateTime < new Date()) {
+      return sendResponse(
+        res,
+
+        400,
+
+        false,
+
+        "destinationDateTime cannot be in the past",
+      );
+    }
+
+    if (status === undefined || status !== "closed") {
+      plan.status = getStatusForTravelWindow(
+        nextStartDateTime,
+
+        nextDestinationDateTime,
+      );
+    }
+
     await plan.save();
 
     await matchTravelPlanWithAlerts(plan);
@@ -606,14 +656,12 @@ exports.getTradesmanProfile = async (req, res) => {
       return sendResponse(res, 404, false, "Tradesman not found");
     }
 
+    const now = new Date();
+
+    await refreshTravelPlanStatuses({ tradesmanId, now });
+
     const travelPlan = await TravelPlan.findOne({
-      where: {
-        tradesmanId,
-
-        status: "open",
-
-        destinationDateTime: { [Op.gte]: new Date() },
-      },
+      where: buildActiveOrUpcomingPlanWhere(tradesmanId, now),
 
       order: [["startDateTime", "ASC"]],
     });

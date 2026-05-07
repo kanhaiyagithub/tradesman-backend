@@ -80,7 +80,7 @@ const TravelPlan = sequelize.define(
     },
 
     status: {
-      type: DataTypes.ENUM("open", "closed", "cancelled"),
+      type: DataTypes.ENUM("open", "running", "closed"),
       defaultValue: "open",
     },
   },

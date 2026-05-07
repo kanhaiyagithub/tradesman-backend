@@ -7,6 +7,10 @@ const SubscriptionPlan = require("../models/SubscriptionPlan");
 const UserSubscription = require("../models/UserSubscription");
 const User = require("../models/User");
 const TravelPlan = require("../models/locationModel");
+const {
+  buildActiveOrUpcomingPlanWhere,
+  refreshTravelPlanStatuses,
+} = require("../services/travelPlanStatusService");
 
 const TRIAL_DAYS = 14;
 const APP_BASE_URL =
@@ -83,14 +87,12 @@ const getStripeSubscriptionWithItem = async (stripeSubscriptionId) => {
 };
 
 const getOpenPlanStopCount = async (userId) => {
+  const now = new Date();
+
+  await refreshTravelPlanStatuses({ tradesmanId: userId, now });
+
   const openPlan = await TravelPlan.findOne({
-    where: {
-      tradesmanId: userId,
-      status: "open",
-      destinationDateTime: {
-        [Op.gte]: new Date(),
-      },
-    },
+    where: buildActiveOrUpcomingPlanWhere(userId, now),
     order: [["createdAt", "DESC"]],
   });
 

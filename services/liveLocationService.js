@@ -4,6 +4,10 @@ const TravelPlan = require("../models/locationModel");
 const TradesmanLiveLocation = require("../models/TradesmanLiveLocation");
 const LiveProximityNotification = require("../models/LiveProximityNotification");
 const {
+  buildActiveOrUpcomingPlanWhere,
+  refreshTravelPlanStatuses,
+} = require("./travelPlanStatusService");
+const {
   sendPushNotification,
 } = require("../controllers/notificationController");
 
@@ -60,11 +64,12 @@ async function processLiveLocation({ tradesmanId, latitude, longitude }) {
     return { success: false, reason: "TRADE_TYPE_MISSING" };
   }
 
+  const now = new Date();
+
+  await refreshTravelPlanStatuses({ tradesmanId, now });
+
   const activeTravelPlan = await TravelPlan.findOne({
-    where: {
-      tradesmanId,
-      status: "open",
-    },
+    where: buildActiveOrUpcomingPlanWhere(tradesmanId, now),
     order: [["id", "DESC"]],
   });
 

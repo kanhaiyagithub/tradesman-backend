@@ -449,7 +449,7 @@ module.exports = {
         },
         stops: { type: DataTypes.JSON, allowNull: true },
         status: {
-          type: DataTypes.ENUM('open', 'closed', 'cancelled'),
+          type: DataTypes.ENUM('open', 'running', 'closed'),
           allowNull: false,
           defaultValue: 'open',
         },

@@ -5,6 +5,7 @@ const Review = require("../models/reviewModel");
 const TravelPlan = require("../models/locationModel");
 const TradesType = require("../models/tradesTypeModel");
 const storageService = require("../services/storage/storageService");
+const { ACTIVE_TRAVEL_PLAN_STATUSES } = require("../services/travelPlanStatusService");
 
 const DEFAULT_FILTER_RADIUS_KM = 15;
 
@@ -888,7 +889,10 @@ exports.getFullUserProfile = async (req, res) => {
         {
           model: TravelPlan,
           as: "travelPlans", // ✅ FIXED ALIAS
-          where: { status: "open" },
+          where: {
+            status: { [Op.in]: ACTIVE_TRAVEL_PLAN_STATUSES },
+            destinationDateTime: { [Op.gte]: new Date() },
+          },
           required: false,
         },
       ],
@@ -1316,7 +1320,10 @@ exports.filterTradesmen = async (req, res) => {
       include.push({
         model: TravelPlan,
         as: "travelPlans",
-        where: { status: "open" },
+        where: {
+          status: { [Op.in]: ACTIVE_TRAVEL_PLAN_STATUSES },
+          destinationDateTime: { [Op.gte]: new Date() },
+        },
         required: true,
       });
     }
