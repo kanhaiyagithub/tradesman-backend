@@ -1,61 +1,52 @@
 const express = require("express");
 const router = express.Router();
-
-const { saveDeviceToken } = require("../models/deviceTokenModel");
 const { verifyToken } = require("../middlewares/authMiddleware");
+const {
+  getMyNotifications,
+  getMyUnreadNotificationCount,
+  markAllMyNotificationsAsRead,
+  markMyNotificationAsRead,
+  saveMyDeviceToken,
+} = require("../controllers/notificationController");
 
 /**
  * Save the authenticated user's Firebase device token.
  *
- * Notes:
- * - Keeps route-level logs for easier request tracing
- * - Trims the incoming token before saving
- * - Relies on the model helper to avoid duplicate token rows
- *
- * @route POST /save-token
+ * @route POST /api/notifications/save-token
  * @access Private
  */
-router.post("/save-token", verifyToken, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { token } = req.body;
+router.post("/save-token", verifyToken, saveMyDeviceToken);
 
-    if (!token || !token.trim()) {
-      console.log("[SAVE TOKEN VALIDATION FAILED]", {
-        userId,
-        reason: "Token is required",
-      });
+/**
+ * Fetch the authenticated user's notification inbox.
+ *
+ * @route GET /api/notifications?limit=20&cursor=123&unreadOnly=false
+ * @access Private
+ */
+router.get("/", verifyToken, getMyNotifications);
 
-      return res.status(400).json({
-        success: false,
-        message: "Token is required",
-      });
-    }
+/**
+ * Fetch unread notification count for badge UI.
+ *
+ * @route GET /api/notifications/unread-count
+ * @access Private
+ */
+router.get("/unread-count", verifyToken, getMyUnreadNotificationCount);
 
-    const sanitizedToken = token.trim();
+/**
+ * Mark every non-expired notification as read.
+ *
+ * @route PATCH /api/notifications/read-all
+ * @access Private
+ */
+router.patch("/read-all", verifyToken, markAllMyNotificationsAsRead);
 
-    await saveDeviceToken(userId, sanitizedToken);
-
-    console.log("[DEVICE TOKEN SAVED]", {
-      userId,
-      token: sanitizedToken.substring(0, 20) + "...",
-    });
-
-    return res.json({
-      success: true,
-      message: "Device token saved successfully",
-    });
-  } catch (error) {
-    console.error("[SAVE TOKEN ERROR]", {
-      message: error.message,
-      stack: error.stack,
-    });
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to save device token",
-    });
-  }
-});
+/**
+ * Mark a single notification as read.
+ *
+ * @route PATCH /api/notifications/:id/read
+ * @access Private
+ */
+router.patch("/:id(\\d+)/read", verifyToken, markMyNotificationAsRead);
 
 module.exports = router;

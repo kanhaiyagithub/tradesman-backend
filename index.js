@@ -7,6 +7,7 @@ dotenv.config();
 const app = require('./app');
 const socket = require('./socket');
 const { refreshTravelPlanStatuses } = require('./services/travelPlanStatusService');
+const { startNotificationCleanupJob } = require('./services/notificationCleanupService');
 
 const server = http.createServer(app);
 socket.init(server);
@@ -36,6 +37,7 @@ server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 
   refreshTravelPlanStatusesSafely();
+  startNotificationCleanupJob();
 
   const statusRefreshTimer = setInterval(
     refreshTravelPlanStatusesSafely,

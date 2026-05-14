@@ -1,5 +1,3 @@
-const { sendPushNotification } = require('./notificationController');
-const User = require('../models/User');
 const chatService = require('../services/chatService');
 
 /**
@@ -99,34 +97,6 @@ const emitMessageToSocketUsers = async (payload) => {
 };
 
 /**
- * Sends a push notification for a direct chat message.
- *
- * @param {number} senderId - Message sender id.
- * @param {number} receiverId - Message receiver id.
- * @param {string} message - Raw message body.
- * @returns {Promise<void>} Resolves after the push attempt finishes.
- */
-const sendChatPush = async (senderId, receiverId, message) => {
-  try {
-    const sender = await User.findByPk(senderId, { attributes: ['name'] });
-    const senderName = sender?.name || 'Someone';
-
-    await sendPushNotification(
-      receiverId,
-      `New Message from ${senderName}`,
-      message.length > 60 ? `${message.substring(0, 60)}...` : message,
-      {
-        type: 'CHAT',
-        senderId,
-        click_action: 'FLUTTER_NOTIFICATION_CLICK',
-      },
-    );
-  } catch (error) {
-    console.error('[CHAT PUSH ERROR]', error.message);
-  }
-};
-
-/**
  * Persists a new chat message through the shared chat service.
  *
  * @param {import('express').Request} req - Express request.
@@ -149,7 +119,6 @@ exports.sendMessage = async (req, res) => {
     });
 
     await emitMessageToSocketUsers(newMessage);
-    await sendChatPush(senderId, receiverId, message);
 
     return sendResponse(res, 201, true, 'Message sent', newMessage);
   } catch (error) {

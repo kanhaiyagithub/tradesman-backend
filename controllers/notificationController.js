@@ -1,208 +1,44 @@
-const admin = require("../utils/firebase");
 const {
-  getTokensByUser,
   saveDeviceToken,
-  deleteDeviceTokens,
   normalizeDeviceToken,
 } = require("../models/deviceTokenModel");
+const {
+  createAndSendNotification,
+  getUnreadNotificationCount,
+  getUserNotifications,
+  markAllNotificationsAsRead,
+  markNotificationAsRead,
+} = require("../services/notificationService");
 
 /**
- * Firebase error codes that mean a device token is permanently unusable and
- * should be removed from the database immediately.
- */
-const INVALID_FCM_TOKEN_CODES = new Set([
-  "messaging/registration-token-not-registered",
-  "messaging/invalid-registration-token",
-]);
-
-/**
- * Converts arbitrary payload values into strings because FCM data fields only
- * support string values.
+ * Backwards-compatible notification sender used by existing domain services.
  *
- * @param {Record<string, unknown>} data - Raw push payload.
- * @returns {Record<string, string>} String-only push payload.
- */
-const buildStringDataPayload = (data = {}) => {
-  const stringData = {};
-
-  Object.keys(data).forEach((key) => {
-    stringData[key] = String(data[key] ?? "");
-  });
-
-  return stringData;
-};
-
-/**
- * Builds the outbound FCM message for a single target token.
- *
- * @param {string} deviceToken - Firebase registration token.
- * @param {string} title - Notification title.
- * @param {string} body - Notification body.
- * @param {Record<string, string>} data - String-only data payload.
- * @returns {import('firebase-admin').messaging.Message} Firebase message.
- */
-const buildPushMessage = (deviceToken, title, body, data) => ({
-  token: deviceToken,
-  notification: {
-    title,
-    body,
-  },
-  data: {
-    ...data,
-    click_action: "FLUTTER_NOTIFICATION_CLICK",
-  },
-  android: {
-    priority: "high",
-    notification: {
-      channelId: "high_importance_channel",
-      sound: "notification_sound",
-    },
-  },
-  apns: {
-    headers: {
-      "apns-priority": "10",
-    },
-    payload: {
-      aps: {
-        sound: "default",
-      },
-    },
-  },
-});
-
-/**
- * Sends a push notification to all currently known device tokens for a user.
- *
- * Dead Firebase tokens are removed automatically so they are not retried on
- * every future notification.
+ * The implementation now persists the notification for the in-app inbox first,
+ * then attempts Firebase delivery as a best-effort side effect.
  *
  * @param {number} userId - Target user ID.
  * @param {string} title - Notification title.
  * @param {string} body - Notification body.
- * @param {Record<string, unknown>} [data={}] - Additional push data.
- * @returns {Promise<{success: boolean, reason: string | null, sentCount: number, failureCount: number, removedInvalidTokenCount?: number}>}
+ * @param {Record<string, unknown>} [data={}] - Notification metadata.
+ * @returns {Promise<object>} Stored notification and push delivery result.
  */
 const sendPushNotification = async (userId, title, body, data = {}) => {
   try {
-    console.log("[PUSH] Starting push notification", {
+    return await createAndSendNotification(userId, title, body, data);
+  } catch (error) {
+    console.error("[NOTIFICATION ERROR] Failed to create/send notification", {
       userId,
       title,
-      body,
-      data,
-      at: new Date().toISOString(),
-    });
-
-    const tokens = await getTokensByUser(userId);
-
-    console.log("[PUSH] Tokens fetched", {
-      userId,
-      tokenCount: tokens ? tokens.length : 0,
-      tokensPreview: (tokens || []).map((tokenRecord) =>
-        tokenRecord.token ? `${tokenRecord.token.substring(0, 15)}...` : null,
-      ),
-    });
-
-    if (!tokens || !tokens.length) {
-      console.log("[PUSH] No tokens found", {
-        userId,
-        at: new Date().toISOString(),
-      });
-
-      return {
-        success: false,
-        reason: "NO_TOKENS",
-        sentCount: 0,
-        failureCount: 0,
-        removedInvalidTokenCount: 0,
-      };
-    }
-
-    const registrationTokens = tokens
-      .map((tokenRecord) => normalizeDeviceToken(tokenRecord.token))
-      .filter(Boolean);
-
-    console.log("[PUSH] Valid tokens prepared", {
-      userId,
-      validTokenCount: registrationTokens.length,
-    });
-
-    if (!registrationTokens.length) {
-      console.log("[PUSH] No valid tokens after filtering", { userId });
-
-      return {
-        success: false,
-        reason: "NO_VALID_TOKENS",
-        sentCount: 0,
-        failureCount: 0,
-        removedInvalidTokenCount: 0,
-      };
-    }
-
-    const stringData = buildStringDataPayload(data);
-    const invalidTokensToDelete = new Set();
-    let successCount = 0;
-    let failureCount = 0;
-
-    for (const deviceToken of registrationTokens) {
-      try {
-        const message = buildPushMessage(deviceToken, title, body, stringData);
-        const response = await admin.messaging().send(message);
-
-        successCount++;
-
-        console.log("[PUSH SUCCESS]", {
-          userId,
-          token: `${deviceToken.substring(0, 15)}...`,
-          messageId: response,
-        });
-      } catch (error) {
-        failureCount++;
-
-        console.error("[PUSH FAILURE]", {
-          userId,
-          token: `${deviceToken.substring(0, 15)}...`,
-          error: error.message,
-          code: error.code,
-        });
-
-        if (INVALID_FCM_TOKEN_CODES.has(error.code)) {
-          invalidTokensToDelete.add(deviceToken);
-        }
-      }
-    }
-
-    let removedInvalidTokenCount = 0;
-
-    if (invalidTokensToDelete.size) {
-      removedInvalidTokenCount = await deleteDeviceTokens([...invalidTokensToDelete]);
-
-      console.log("[PUSH CLEANUP] Removed invalid device tokens", {
-        userId,
-        removedInvalidTokenCount,
-        removedTokensPreview: [...invalidTokensToDelete].map(
-          (deviceToken) => `${deviceToken.substring(0, 15)}...`
-        ),
-      });
-    }
-
-    return {
-      success: successCount > 0,
-      reason: successCount > 0 ? null : "ALL_PUSHES_FAILED",
-      sentCount: successCount,
-      failureCount,
-      removedInvalidTokenCount,
-    };
-  } catch (error) {
-    console.error("[PUSH ERROR] Push crashed", {
-      userId,
       error: error.message,
       stack: error.stack,
-      at: new Date().toISOString(),
     });
 
     return {
       success: false,
-      reason: error.message || "PUSH_SEND_FAILED",
+      reason: error.message || "NOTIFICATION_CREATE_FAILED",
+      notificationStored: false,
+      notificationId: null,
+      pushSuccess: false,
       sentCount: 0,
       failureCount: 0,
       removedInvalidTokenCount: 0,
@@ -222,17 +58,7 @@ const saveMyDeviceToken = async (req, res) => {
     const userId = req.user.id;
     const normalizedToken = normalizeDeviceToken(req.body?.token);
 
-    console.log("[TOKEN] Save request received", {
-      userId,
-      hasToken: !!normalizedToken,
-      tokenPreview: normalizedToken
-        ? `${normalizedToken.substring(0, 15)}...`
-        : null,
-    });
-
     if (!normalizedToken) {
-      console.log("[TOKEN] Token missing", { userId });
-
       return res.status(400).json({
         success: false,
         message: "Token is required",
@@ -240,12 +66,6 @@ const saveMyDeviceToken = async (req, res) => {
     }
 
     await saveDeviceToken(userId, normalizedToken);
-
-    console.log("[TOKEN] Token saved successfully", {
-      userId,
-      tokenPreview: `${normalizedToken.substring(0, 15)}...`,
-      at: new Date().toISOString(),
-    });
 
     return res.json({
       success: true,
@@ -265,7 +85,159 @@ const saveMyDeviceToken = async (req, res) => {
   }
 };
 
+/**
+ * Lists authenticated user's non-expired notifications.
+ *
+ * Query params:
+ * - limit: 1..100, defaults to 20
+ * - cursor: notification id returned as nextCursor from previous page
+ * - unreadOnly: true/false
+ *
+ * @param {import('express').Request} req - Express request.
+ * @param {import('express').Response} res - Express response.
+ * @returns {Promise<import('express').Response>} JSON result.
+ */
+const getMyNotifications = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const unreadOnly = String(req.query.unreadOnly || "false").toLowerCase() === "true";
+
+    const result = await getUserNotifications({
+      userId,
+      limit: req.query.limit,
+      cursor: req.query.cursor,
+      unreadOnly,
+    });
+
+    return res.json({
+      success: true,
+      message: "Notifications fetched successfully",
+      data: result.items,
+      meta: result.meta,
+    });
+  } catch (error) {
+    console.error("[GET NOTIFICATIONS ERROR]", {
+      error: error.message,
+      stack: error.stack,
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch notifications",
+    });
+  }
+};
+
+/**
+ * Returns authenticated user's unread notification count.
+ *
+ * @param {import('express').Request} req - Express request.
+ * @param {import('express').Response} res - Express response.
+ * @returns {Promise<import('express').Response>} JSON result.
+ */
+const getMyUnreadNotificationCount = async (req, res) => {
+  try {
+    const unreadCount = await getUnreadNotificationCount(req.user.id);
+
+    return res.json({
+      success: true,
+      message: "Unread notification count fetched successfully",
+      data: { unreadCount },
+    });
+  } catch (error) {
+    console.error("[GET UNREAD NOTIFICATION COUNT ERROR]", {
+      error: error.message,
+      stack: error.stack,
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch unread notification count",
+    });
+  }
+};
+
+/**
+ * Marks a single notification as read for the authenticated user.
+ *
+ * @param {import('express').Request} req - Express request.
+ * @param {import('express').Response} res - Express response.
+ * @returns {Promise<import('express').Response>} JSON result.
+ */
+const markMyNotificationAsRead = async (req, res) => {
+  try {
+    const notificationId = Number(req.params.id);
+
+    if (!notificationId) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid notification id",
+      });
+    }
+
+    const updated = await markNotificationAsRead({
+      userId: req.user.id,
+      notificationId,
+    });
+
+    if (!updated) {
+      return res.status(404).json({
+        success: false,
+        message: "Notification not found or already read",
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Notification marked as read",
+    });
+  } catch (error) {
+    console.error("[MARK NOTIFICATION READ ERROR]", {
+      error: error.message,
+      stack: error.stack,
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to mark notification as read",
+    });
+  }
+};
+
+/**
+ * Marks all non-expired notifications as read for the authenticated user.
+ *
+ * @param {import('express').Request} req - Express request.
+ * @param {import('express').Response} res - Express response.
+ * @returns {Promise<import('express').Response>} JSON result.
+ */
+const markAllMyNotificationsAsRead = async (req, res) => {
+  try {
+    const updatedCount = await markAllNotificationsAsRead(req.user.id);
+
+    return res.json({
+      success: true,
+      message: "All notifications marked as read",
+      data: { updatedCount },
+    });
+  } catch (error) {
+    console.error("[MARK ALL NOTIFICATIONS READ ERROR]", {
+      error: error.message,
+      stack: error.stack,
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to mark notifications as read",
+    });
+  }
+};
+
 module.exports = {
-  sendPushNotification,
+  getMyNotifications,
+  getMyUnreadNotificationCount,
+  markAllMyNotificationsAsRead,
+  markMyNotificationAsRead,
   saveMyDeviceToken,
+  sendPushNotification,
 };

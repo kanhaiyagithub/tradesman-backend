@@ -1,0 +1,114 @@
+diff --git a/controllers/chatController.js b/controllers/chatController.js
+index 6a8e109..f34a50c 100644
+--- a/controllers/chatController.js
++++ b/controllers/chatController.js
+@@ -1,5 +1,3 @@
+-const { sendPushNotification } = require('./notificationController');
+-const User = require('../models/User');
+ const chatService = require('../services/chatService');
+ 
+ /**
+@@ -98,34 +96,6 @@ const emitMessageToSocketUsers = async (payload) => {
+   }
+ };
+ 
+-/**
+- * Sends a push notification for a direct chat message.
+- *
+- * @param {number} senderId - Message sender id.
+- * @param {number} receiverId - Message receiver id.
+- * @param {string} message - Raw message body.
+- * @returns {Promise<void>} Resolves after the push attempt finishes.
+- */
+-const sendChatPush = async (senderId, receiverId, message) => {
+-  try {
+-    const sender = await User.findByPk(senderId, { attributes: ['name'] });
+-    const senderName = sender?.name || 'Someone';
+-
+-    await sendPushNotification(
+-      receiverId,
+-      `New Message from ${senderName}`,
+-      message.length > 60 ? `${message.substring(0, 60)}...` : message,
+-      {
+-        type: 'CHAT',
+-        senderId,
+-        click_action: 'FLUTTER_NOTIFICATION_CLICK',
+-      },
+-    );
+-  } catch (error) {
+-    console.error('[CHAT PUSH ERROR]', error.message);
+-  }
+-};
+-
+ /**
+  * Persists a new chat message through the shared chat service.
+  *
+@@ -149,7 +119,6 @@ exports.sendMessage = async (req, res) => {
+     });
+ 
+     await emitMessageToSocketUsers(newMessage);
+-    await sendChatPush(senderId, receiverId, message);
+ 
+     return sendResponse(res, 201, true, 'Message sent', newMessage);
+   } catch (error) {
+diff --git a/services/notificationService.js b/services/notificationService.js
+index 274ed5c..0b99053 100644
+--- a/services/notificationService.js
++++ b/services/notificationService.js
+@@ -6,6 +6,29 @@ const DEFAULT_RETENTION_DAYS = Number(process.env.NOTIFICATION_RETENTION_DAYS ||
+ const DEFAULT_LIMIT = 20;
+ const MAX_LIMIT = 100;
+ 
++/**
++ * Notification types that should only be delivered as Firebase push messages.
++ *
++ * These events already have their own source-of-truth tables, such as chat
++ * messages and conversation unread counts, so duplicating them in the generic
++ * notification inbox would create noisy and stale data.
++ */
++const PUSH_ONLY_NOTIFICATION_TYPES = new Set([
++  "CHAT",
++  "CHAT_MESSAGE",
++  "TYPING",
++  "CALL_RINGING",
++]);
++
++/**
++ * Checks whether a notification type should skip inbox persistence.
++ *
++ * @param {string|null|undefined} type - Raw notification type.
++ * @returns {boolean} True when the type should be push-only.
++ */
++const isPushOnlyNotificationType = (type) =>
++  PUSH_ONLY_NOTIFICATION_TYPES.has(String(type || "").toUpperCase());
++
+ /**
+  * Adds days to a date without mutating the input date.
+  *
+@@ -101,6 +124,26 @@ const createNotification = async ({ userId, title, body, type = "general", data
+  */
+ const createAndSendNotification = async (userId, title, body, data = {}) => {
+   const notificationType = data.type || "general";
++
++  if (isPushOnlyNotificationType(notificationType)) {
++    const pushResult = await sendPushToUser(userId, title, body, data);
++
++    return {
++      // Backwards-compatible field used by existing services.
++      success: true,
++      reason: null,
++
++      // Push-only events, such as chat messages, are not stored in the inbox.
++      notificationStored: false,
++      notificationId: null,
++      pushSuccess: pushResult.pushSuccess,
++      pushReason: pushResult.reason,
++      sentCount: pushResult.sentCount,
++      failureCount: pushResult.failureCount,
++      removedInvalidTokenCount: pushResult.removedInvalidTokenCount,
++    };
++  }
++
+   const notification = await createNotification({
+     userId,
+     title,
