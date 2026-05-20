@@ -12,7 +12,8 @@
     "chat:backfill": "node scripts/backfillConversations.js",
     "chat:backfill:dry": "node scripts/backfillConversations.js --dry-run",
     "chat:migrate:conversation-id:dry": "node scripts/migrateMessageConversationIds.js --dry-run",
-    "chat:migrate:conversation-id": "node scripts/migrateMessageConversationIds.js"
+    "chat:migrate:conversation-id": "node scripts/migrateMessageConversationIds.js",
+    "subscriptions:seed": "node scripts/createStripePlan.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

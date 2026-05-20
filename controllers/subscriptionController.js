@@ -4,6 +4,7 @@ const { Op } = require("sequelize");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const SubscriptionPlan = require("../models/SubscriptionPlan");
+const { SUBSCRIPTION_PLAN_NAMES } = require("../config/subscriptionPlans");
 const UserSubscription = require("../models/UserSubscription");
 const User = require("../models/User");
 const TravelPlan = require("../models/locationModel");
@@ -54,6 +55,24 @@ const getLatestSubscriptionForUser = async (userId) => {
     include: [{ model: SubscriptionPlan, as: "plan" }],
     order: [["createdAt", "DESC"]],
   });
+};
+
+/**
+ * Finds only subscription plans that belong to the currently supported product
+ * list. This prevents old development plans, such as the previous Premium Plan,
+ * from being selected through the API.
+ *
+ * @param {number} planId - Subscription plan primary key.
+ * @returns {Promise<SubscriptionPlan|null>} Configured subscription plan.
+ */
+const getConfiguredSubscriptionPlanById = async (planId) => {
+  const plan = await SubscriptionPlan.findByPk(planId);
+
+  if (!plan || !SUBSCRIPTION_PLAN_NAMES.includes(plan.name)) {
+    return null;
+  }
+
+  return plan;
 };
 
 const getManageableSubscriptionForUser = async (userId) => {
@@ -109,10 +128,23 @@ const getOpenPlanStopCount = async (userId) => {
 exports.getPlans = async (req, res) => {
   try {
     const plans = await SubscriptionPlan.findAll({
+      where: {
+        name: {
+          [Op.in]: SUBSCRIPTION_PLAN_NAMES,
+        },
+      },
       order: [["priceMonthly", "ASC"]],
     });
 
-    return sendResponse(res, 200, true, "Plans fetched", plans);
+    const planOrder = new Map(
+      SUBSCRIPTION_PLAN_NAMES.map((planName, index) => [planName, index])
+    );
+
+    const orderedPlans = plans.sort(
+      (a, b) => planOrder.get(a.name) - planOrder.get(b.name)
+    );
+
+    return sendResponse(res, 200, true, "Plans fetched", orderedPlans);
   } catch (err) {
     console.error("getPlans error:", err);
     return sendResponse(res, 500, false, "Server error");
@@ -154,8 +186,10 @@ exports.createCheckoutSession = async (req, res) => {
       return sendResponse(res, 400, false, "planId is required");
     }
 
-    const plan = await SubscriptionPlan.findByPk(numericPlanId);
-    if (!plan) return sendResponse(res, 404, false, "Plan not found");
+    const plan = await getConfiguredSubscriptionPlanById(numericPlanId);
+    if (!plan) {
+      return sendResponse(res, 404, false, "Plan not found or not available");
+    }
     if (!plan.stripePriceId) {
       return sendResponse(res, 400, false, "Stripe price not configured");
     }
@@ -287,10 +321,10 @@ async function changePlan(req, res, mode) {
     }
 
     const currentPlan = localSubscription.plan;
-    const targetPlan = await SubscriptionPlan.findByPk(targetPlanId);
+    const targetPlan = await getConfiguredSubscriptionPlanById(targetPlanId);
 
     if (!targetPlan) {
-      return sendResponse(res, 404, false, "Target plan not found");
+      return sendResponse(res, 404, false, "Target plan not found or not available");
     }
 
     if (!targetPlan.stripePriceId) {
@@ -560,9 +594,9 @@ exports.createMobileSubscription = async (req, res) => {
       );
     }
 
-    const plan = await SubscriptionPlan.findByPk(planId);
+    const plan = await getConfiguredSubscriptionPlanById(planId);
     if (!plan) {
-      return sendResponse(res, 404, false, "Plan not found");
+      return sendResponse(res, 404, false, "Plan not found or not available");
     }
 
     if (!plan.stripePriceId) {

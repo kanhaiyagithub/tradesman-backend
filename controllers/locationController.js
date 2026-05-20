@@ -42,6 +42,21 @@ async function getAccessiblePlanForUser(userId) {
   });
 }
 
+// ================= REQUEST NORMALIZERS =================
+
+/**
+ * Normalizes boolean values coming from JSON, form-data, or mobile clients.
+ *
+ * This prevents stop validation from being skipped when a client sends
+ * allowStops as "true" instead of the boolean value true.
+ *
+ * @param {boolean|string|number|null|undefined} value - Incoming request value.
+ * @returns {boolean} Normalized boolean value.
+ */
+function normalizeBoolean(value) {
+  return value === true || value === "true" || value === 1 || value === "1";
+}
+
 // ================= STOPS PARSER =================
 
 function parseStops(stops) {
@@ -149,12 +164,12 @@ function validateStopsStructure(parsedStops) {
 function enforcePlanStopLimit(subscription, allowStops, parsedStops) {
   if (!allowStops) return null;
 
-  const maxStops = subscription?.plan?.maxSharedLocations ?? 0;
+  const maxStops = Number(subscription?.plan?.maxSharedLocations ?? 0);
 
   const stopCount = parsedStops?.length || 0;
 
   if (stopCount > maxStops) {
-    return `Your current plan allows maximum ${maxStops} stop(s).`;
+    return `${subscription.plan.name} allows maximum ${maxStops} stop(s).`;
   }
 
   return null;
@@ -279,9 +294,10 @@ exports.createTravelPlan = async (req, res) => {
       );
     }
 
+    const normalizedAllowStops = normalizeBoolean(allowStops);
     const parsedStops = parseStops(stops);
 
-    if (allowStops === true) {
+    if (normalizedAllowStops) {
       const structureError = validateStopsStructure(parsedStops);
 
       if (structureError) {
@@ -291,7 +307,7 @@ exports.createTravelPlan = async (req, res) => {
       const limitError = enforcePlanStopLimit(
         subscription,
 
-        allowStops,
+        normalizedAllowStops,
 
         parsedStops,
       );
@@ -343,9 +359,9 @@ exports.createTravelPlan = async (req, res) => {
 
       priceRange,
 
-      allowStops,
+      allowStops: normalizedAllowStops,
 
-      stops: allowStops ? parsedStops : null,
+      stops: normalizedAllowStops ? parsedStops : null,
 
       status: getStatusForTravelWindow(startDateTime, destinationDateTime, now),
     });
@@ -439,6 +455,11 @@ exports.updateMyTravelPlan = async (req, res) => {
       status,
     } = req.body;
 
+    const hasAllowStopsUpdate = allowStops !== undefined;
+    const normalizedAllowStops = hasAllowStopsUpdate
+      ? normalizeBoolean(allowStops)
+      : undefined;
+
     if (currentLocation !== undefined) plan.currentLocation = currentLocation;
 
     if (latitude !== undefined) plan.latitude = latitude;
@@ -473,15 +494,16 @@ exports.updateMyTravelPlan = async (req, res) => {
       plan.destinationLongitude = destinationLongitude;
     }
 
-    const nextAllowStops =
-      allowStops !== undefined ? allowStops : Boolean(plan.allowStops);
+    const nextAllowStops = hasAllowStopsUpdate
+      ? normalizedAllowStops
+      : Boolean(plan.allowStops);
 
     let nextStops = plan.stops;
 
-    if (allowStops !== undefined) {
-      plan.allowStops = allowStops;
+    if (hasAllowStopsUpdate) {
+      plan.allowStops = normalizedAllowStops;
 
-      if (allowStops === true) {
+      if (normalizedAllowStops) {
         const parsedStops = parseStops(stops);
 
         const structureError = validateStopsStructure(parsedStops);
@@ -493,7 +515,7 @@ exports.updateMyTravelPlan = async (req, res) => {
         const limitError = enforcePlanStopLimit(
           subscription,
 
-          allowStops,
+          normalizedAllowStops,
 
           parsedStops,
         );
@@ -538,7 +560,7 @@ exports.updateMyTravelPlan = async (req, res) => {
       }
     }
 
-    if (nextAllowStops === true) {
+    if (nextAllowStops) {
       const currentStops = nextStops || [];
 
       const limitError = enforcePlanStopLimit(subscription, true, currentStops);
