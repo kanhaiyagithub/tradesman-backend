@@ -77,6 +77,11 @@ const TravelPlanAlertMatch = sequelize.define(
       { fields: ["travelPlanId"] },
       { fields: ["clientId"] },
       { fields: ["clientTradeAlertId"] },
+      {
+        name: "uq_travel_plan_alert_matches_plan_alert",
+        unique: true,
+        fields: ["travelPlanId", "clientTradeAlertId"],
+      },
     ],
   }
 );

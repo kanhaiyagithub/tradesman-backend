@@ -1,4 +1,7 @@
 const ClientTradeAlert = require("../models/clientTradeAlertModel");
+const {
+  matchClientTradeAlertWithTravelPlans,
+} = require("../services/travelAlertService");
 
 const sendResponse = (res, statusCode, success, message, data = null) =>
   res.status(statusCode).json({ success, message, data });
@@ -7,6 +10,51 @@ const normalizeTradeType = (value) => {
   if (!value || typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
   return normalized || null;
+};
+
+/**
+ * Validates an optional date value sent by the mobile app or Postman.
+ *
+ * @param {string|Date|null|undefined} value - Incoming date value.
+ * @returns {boolean} True when the value is empty or parseable as a Date.
+ */
+const isValidOptionalDate = (value) => {
+  if (value === undefined || value === null || value === "") return true;
+  return !Number.isNaN(new Date(value).getTime());
+};
+
+/**
+ * Runs matching after an alert change without making the client-alert API fail
+ * because of a notification or matching-side issue. The matching service catches
+ * its own errors, and this wrapper keeps the controller response predictable.
+ *
+ * @param {import("sequelize").Model} alert - Saved ClientTradeAlert instance.
+ * @returns {Promise<void>}
+ */
+const runAlertMatching = async (alert) => {
+  try {
+    console.log("[TRAVEL_ALERT] Client-alert API triggered matching", {
+      clientTradeAlertId: alert?.id,
+      clientId: alert?.clientId,
+      tradeTypeId: alert?.tradeTypeId,
+      radiusKm: alert?.radiusKm,
+      isActive: alert?.isActive,
+    });
+
+    const summary = await matchClientTradeAlertWithTravelPlans(alert);
+
+    console.log("[TRAVEL_ALERT] Client-alert API matching completed", {
+      clientTradeAlertId: alert?.id,
+      clientId: alert?.clientId,
+      ...summary,
+    });
+  } catch (error) {
+    console.error("[TRAVEL_ALERT] Client-alert API matching failed", {
+      clientTradeAlertId: alert?.id,
+      clientId: alert?.clientId,
+      error: error.message,
+    });
+  }
 };
 
 exports.createClientTradeAlert = async (req, res) => {
@@ -55,6 +103,10 @@ exports.createClientTradeAlert = async (req, res) => {
       return sendResponse(res, 400, false, "radiusKm must be greater than 0");
     }
 
+    if (!isValidOptionalDate(startDate) || !isValidOptionalDate(endDate)) {
+      return sendResponse(res, 400, false, "startDate and endDate must be valid dates");
+    }
+
     if (startDate && endDate && new Date(startDate) > new Date(endDate)) {
       return sendResponse(res, 400, false, "startDate cannot be after endDate");
     }
@@ -71,6 +123,8 @@ exports.createClientTradeAlert = async (req, res) => {
       endDate: endDate || null,
       isActive: true,
     });
+
+    await runAlertMatching(alert);
 
     return sendResponse(res, 201, true, "Client trade alert created", alert);
   } catch (error) {
@@ -168,10 +222,16 @@ exports.updateClientTradeAlert = async (req, res) => {
     }
 
     if (startDate !== undefined) {
+      if (!isValidOptionalDate(startDate)) {
+        return sendResponse(res, 400, false, "startDate must be a valid date");
+      }
       alert.startDate = startDate || null;
     }
 
     if (endDate !== undefined) {
+      if (!isValidOptionalDate(endDate)) {
+        return sendResponse(res, 400, false, "endDate must be a valid date");
+      }
       alert.endDate = endDate || null;
     }
 
@@ -184,6 +244,10 @@ exports.updateClientTradeAlert = async (req, res) => {
     }
 
     await alert.save();
+
+    if (alert.isActive) {
+      await runAlertMatching(alert);
+    }
 
     return sendResponse(res, 200, true, "Trade alert updated", alert);
   } catch (error) {
@@ -211,6 +275,10 @@ exports.toggleClientTradeAlert = async (req, res) => {
 
     alert.isActive = !alert.isActive;
     await alert.save();
+
+    if (alert.isActive) {
+      await runAlertMatching(alert);
+    }
 
     return sendResponse(
       res,
