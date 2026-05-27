@@ -39,13 +39,74 @@ function getDistanceKm(lat1, lon1, lat2, lon2) {
 }
 
 /**
- * Checks whether the tradesman's expected arrival time falls inside the client's
- * requested alert window.
+ * Parses a date-like value and returns the start of that UTC calendar day.
  *
- * @param {Date|string|null} jobStartDate - Client requested start date/time.
- * @param {Date|string|null} jobEndDate - Client requested end date/time.
+ * Alert dates are user constraints, so matching should ignore the time portion.
+ *
+ * @param {Date|string|null|undefined} value - Date-like input.
+ * @returns {Date|null} Start of the UTC calendar day, or null for invalid input.
+ */
+function startOfCalendarDay(value) {
+  if (!value) return null;
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+
+  return new Date(Date.UTC(
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    date.getUTCDate(),
+    0,
+    0,
+    0,
+    0,
+  ));
+}
+
+/**
+ * Parses a date-like value and returns the end of that UTC calendar day.
+ *
+ * @param {Date|string|null|undefined} value - Date-like input.
+ * @returns {Date|null} End of the UTC calendar day, or null for invalid input.
+ */
+function endOfCalendarDay(value) {
+  if (!value) return null;
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+
+  return new Date(Date.UTC(
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    date.getUTCDate(),
+    23,
+    59,
+    59,
+    999,
+  ));
+}
+
+/**
+ * Converts a date-like value to a comparable UTC date key.
+ *
+ * @param {Date|string|null|undefined} value - Date-like input.
+ * @returns {string|null} Date key in YYYY-MM-DD format.
+ */
+function getUtcDateKey(value) {
+  const day = startOfCalendarDay(value);
+  if (!day) return null;
+
+  return day.toISOString().slice(0, 10);
+}
+
+/**
+ * Checks whether the tradesman's expected arrival date falls inside the client's
+ * requested alert date window.
+ *
+ * @param {Date|string|null} jobStartDate - Client requested start date.
+ * @param {Date|string|null} jobEndDate - Client requested end date.
  * @param {Date|string|null} pointDateTime - Expected tradesman arrival date/time.
- * @returns {boolean} True when the point time satisfies the alert window.
+ * @returns {boolean} True when the point date satisfies the alert window.
  */
 function isDateMatch(jobStartDate, jobEndDate, pointDateTime) {
   // No date filter means the client is open to any arrival time.
@@ -54,18 +115,18 @@ function isDateMatch(jobStartDate, jobEndDate, pointDateTime) {
   // If the client supplied a date constraint, an undated route point is unsafe.
   if (!pointDateTime) return false;
 
-  const pointTime = new Date(pointDateTime).getTime();
+  const pointDateKey = getUtcDateKey(pointDateTime);
 
-  if (Number.isNaN(pointTime)) return false;
+  if (!pointDateKey) return false;
 
   if (jobStartDate) {
-    const startTime = new Date(jobStartDate).getTime();
-    if (Number.isNaN(startTime) || pointTime < startTime) return false;
+    const startDateKey = getUtcDateKey(jobStartDate);
+    if (!startDateKey || pointDateKey < startDateKey) return false;
   }
 
   if (jobEndDate) {
-    const endTime = new Date(jobEndDate).getTime();
-    if (Number.isNaN(endTime) || pointTime > endTime) return false;
+    const endDateKey = getUtcDateKey(jobEndDate);
+    if (!endDateKey || pointDateKey > endDateKey) return false;
   }
 
   return true;
@@ -235,8 +296,11 @@ function findBestRoutePointForAlert(alert, travelPlan, logContext = null) {
  * @returns {object} Sequelize where-clause.
  */
 function buildCandidateTravelPlanWhere(alert, now) {
-  const earliestRelevantArrival = alert.startDate
-    ? new Date(Math.max(now.getTime(), new Date(alert.startDate).getTime()))
+  const alertStartDay = startOfCalendarDay(alert.startDate);
+  const alertEndDay = endOfCalendarDay(alert.endDate);
+
+  const earliestRelevantArrival = alertStartDay
+    ? new Date(Math.max(now.getTime(), alertStartDay.getTime()))
     : now;
 
   const where = {
@@ -244,8 +308,8 @@ function buildCandidateTravelPlanWhere(alert, now) {
     destinationDateTime: { [Op.gte]: earliestRelevantArrival },
   };
 
-  if (alert.endDate) {
-    where.startDateTime = { [Op.lte]: new Date(alert.endDate) };
+  if (alertEndDay) {
+    where.startDateTime = { [Op.lte]: alertEndDay };
   }
 
   return where;
@@ -311,6 +375,7 @@ async function createMatchAndNotify({ alert, travelPlan, bestMatch }) {
       type: "travel_match",
       matchId: match.id,
       travelPlanId: travelPlan.id,
+      tradesmanId: travelPlan.tradesmanId,
       clientTradeAlertId: alert.id,
       matchedStopName: bestMatch.point.name,
       estimatedArrivalDate: bestMatch.point.expectedDateTime || "",
