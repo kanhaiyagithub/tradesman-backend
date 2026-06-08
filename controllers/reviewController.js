@@ -8,6 +8,22 @@ exports.addReview = async (req, res) => {
     const userRole = req.user.role; // "client" | "tradesman"
     const { hireId, rating, comment } = req.body;
 
+    if (!hireId || rating === undefined || rating === null) {
+      return res.status(400).json({
+        success: false,
+        message: "hireId and rating are required"
+      });
+    }
+
+    const numericRating = Number(rating);
+
+    if (!Number.isInteger(numericRating) || numericRating < 1 || numericRating > 5) {
+      return res.status(400).json({
+        success: false,
+        message: "Rating must be an integer between 1 and 5"
+      });
+    }
+
     const hire = await Hire.findByPk(hireId);
     if (!hire) {
       return res.status(404).json({ success: false, message: "Hire not found" });
@@ -34,7 +50,7 @@ exports.addReview = async (req, res) => {
     }
 
     const already = await Review.findOne({
-      where: { hireId, role: userRole }
+      where: { hireId, fromUserId: userId }
     });
 
     if (already) {
@@ -45,14 +61,16 @@ exports.addReview = async (req, res) => {
       hireId,
       fromUserId,
       toUserId,
-      rating,
-      comment,
+      rating: numericRating,
+      comment: comment ? String(comment).trim() : null,
       role: userRole
     });
 
     res.json({
       success: true,
-      message: "Review submitted successfully",
+      message: userRole === "tradesman"
+        ? "Client review submitted successfully"
+        : "Tradesman review submitted successfully",
       data: review
     });
 

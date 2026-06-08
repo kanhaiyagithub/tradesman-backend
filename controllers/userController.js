@@ -1,6 +1,7 @@
 const User = require("../models/User");
 const TradesmanDetails = require("../models/TradesmanDetails");
 const Hire = require("../models/hireModel");
+const Message = require("../models/messageModel");
 const Review = require("../models/reviewModel");
 const TravelPlan = require("../models/locationModel");
 const TradesType = require("../models/tradesTypeModel");
@@ -870,6 +871,107 @@ exports.getMeProfile = async (req, res) => {
   } catch (error) {
     console.error(error);
     return sendResponse(res, 500, false, "Server error");
+  }
+};
+
+exports.getClientProfileForTradesman = async (req, res) => {
+  try {
+    const tradesmanId = req.user?.id;
+    const requesterRole = req.user?.role;
+    const clientId = Number(req.params.clientId);
+
+    if (requesterRole !== "tradesman") {
+      return sendResponse(
+        res,
+        403,
+        false,
+        "Only tradesmen can access client profiles from this endpoint"
+      );
+    }
+
+    if (!clientId || Number.isNaN(clientId)) {
+      return sendResponse(res, 400, false, "Valid clientId is required");
+    }
+
+    const client = await User.findOne({
+      where: { id: clientId, role: "client" },
+      attributes: ["id", "name", "email", "mobile", "profileImage", "role", "createdAt"],
+    });
+
+    if (!client) {
+      return sendResponse(res, 404, false, "Client not found");
+    }
+
+    const hireConnection = await Hire.findOne({
+      where: { clientId, tradesmanId },
+      attributes: ["id", "status", "createdAt", "updatedAt"],
+      order: [["updatedAt", "DESC"]],
+    });
+
+    const messageConnection = await Message.findOne({
+      where: {
+        [Op.or]: [
+          { senderId: clientId, receiverId: tradesmanId },
+          { senderId: tradesmanId, receiverId: clientId },
+        ],
+      },
+      attributes: ["id", "senderId", "receiverId", "createdAt"],
+      order: [["createdAt", "DESC"]],
+    });
+
+    if (!hireConnection && !messageConnection) {
+      return sendResponse(
+        res,
+        403,
+        false,
+        "You can view this client profile only after a hire request or chat exists"
+      );
+    }
+
+    const reviews = await Review.findAll({
+      where: { toUserId: clientId },
+      attributes: ["rating"],
+    });
+
+    const avgRating =
+      reviews.length > 0
+        ? (
+            reviews.reduce((sum, review) => sum + Number(review.rating || 0), 0) /
+            reviews.length
+          ).toFixed(1)
+        : "0.0";
+
+    const completedJobsCount = await Hire.count({
+      where: { clientId, status: "completed" },
+    });
+
+    return sendResponse(res, 200, true, "Client profile fetched successfully", {
+      id: client.id,
+      name: client.name,
+      email: client.email,
+      mobile: client.mobile,
+      role: client.role,
+      profileImage: toPublicProfileImage(client.profileImage),
+      rating: avgRating,
+      reviewCount: reviews.length,
+      completedJobsCount,
+      access: {
+        hasHireConnection: Boolean(hireConnection),
+        hasChatConnection: Boolean(messageConnection),
+        latestHire: hireConnection
+          ? {
+              id: hireConnection.id,
+              status: hireConnection.status,
+              createdAt: hireConnection.createdAt,
+              updatedAt: hireConnection.updatedAt,
+            }
+          : null,
+        latestMessageAt: messageConnection?.createdAt || null,
+      },
+    });
+  } catch (error) {
+    console.error("Client Profile Access Error:", error);
+    return sendResponse(res, 500, false, "Server error", null, error.message);
   }
 };
 

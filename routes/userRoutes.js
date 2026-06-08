@@ -29,6 +29,7 @@ router.post('/tradesmen/filter', userController.filterTradesmen);
 // Profiles
 router.get('/profile/:id', userController.getFullUserProfile);
 router.get('/me', verifyToken, userController.getMeProfile);
+router.get('/clients/:clientId/profile', verifyToken, userController.getClientProfileForTradesman);
 
 // Update
 router.put('/change-password', verifyToken, userController.changePassword);
