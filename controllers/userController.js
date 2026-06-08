@@ -131,6 +131,79 @@ const serializeUserWithTradesman = (payload) => {
   return nextPayload;
 };
 
+
+const serializeReview = (reviewPayload, reviewerPayload = null) => ({
+  id: reviewPayload.id,
+  hireId: reviewPayload.hireId,
+  rating: reviewPayload.rating,
+  comment: reviewPayload.comment,
+  role: reviewPayload.role,
+  fromUserId: reviewPayload.fromUserId,
+  toUserId: reviewPayload.toUserId,
+  fromUser: reviewerPayload
+    ? serializeUserMedia({
+        id: reviewerPayload.id,
+        name: reviewerPayload.name,
+        role: reviewerPayload.role,
+        profileImage: reviewerPayload.profileImage,
+      })
+    : null,
+  createdAt: reviewPayload.createdAt,
+  updatedAt: reviewPayload.updatedAt,
+});
+
+const getUserReceivedReviewSummary = async (userId) => {
+  const receivedReviews = await Review.findAll({
+    where: { toUserId: userId },
+    attributes: [
+      "id",
+      "hireId",
+      "fromUserId",
+      "toUserId",
+      "rating",
+      "comment",
+      "role",
+      "createdAt",
+      "updatedAt",
+    ],
+    order: [["createdAt", "DESC"]],
+  });
+
+  const reviewerIds = [
+    ...new Set(receivedReviews.map((review) => review.fromUserId).filter(Boolean)),
+  ];
+
+  const reviewers = reviewerIds.length
+    ? await User.findAll({
+        where: { id: { [Op.in]: reviewerIds } },
+        attributes: ["id", "name", "role", "profileImage"],
+      })
+    : [];
+
+  const reviewerById = reviewers.reduce((map, reviewer) => {
+    map[reviewer.id] = reviewer.toJSON();
+    return map;
+  }, {});
+
+  const reviews = receivedReviews.map((review) => {
+    const reviewJson = review.toJSON();
+    return serializeReview(reviewJson, reviewerById[reviewJson.fromUserId]);
+  });
+
+  const avgRating = reviews.length
+    ? (
+        reviews.reduce((sum, review) => sum + Number(review.rating || 0), 0) /
+        reviews.length
+      ).toFixed(1)
+    : "0.0";
+
+  return {
+    rating: avgRating,
+    reviewCount: reviews.length,
+    reviews,
+  };
+};
+
 const signToken = (user) => {
   return jwt.sign(
     { id: user.id, email: user.email, role: user.role },
@@ -856,6 +929,7 @@ exports.getMeProfile = async (req, res) => {
     }
 
     const userJson = user.toJSON();
+    const reviewSummary = await getUserReceivedReviewSummary(req.user.id);
 
     return sendResponse(
       res,
@@ -866,6 +940,7 @@ exports.getMeProfile = async (req, res) => {
         ...userJson,
         tradeTypeId: userJson.TradesmanDetail?.tradeTypeId || null,
         tradeType: userJson.TradesmanDetail?.tradeType || null,
+        ...reviewSummary,
       })
     );
   } catch (error) {
@@ -928,18 +1003,7 @@ exports.getClientProfileForTradesman = async (req, res) => {
       );
     }
 
-    const reviews = await Review.findAll({
-      where: { toUserId: clientId },
-      attributes: ["rating"],
-    });
-
-    const avgRating =
-      reviews.length > 0
-        ? (
-            reviews.reduce((sum, review) => sum + Number(review.rating || 0), 0) /
-            reviews.length
-          ).toFixed(1)
-        : "0.0";
+    const reviewSummary = await getUserReceivedReviewSummary(clientId);
 
     const completedJobsCount = await Hire.count({
       where: { clientId, status: "completed" },
@@ -952,8 +1016,9 @@ exports.getClientProfileForTradesman = async (req, res) => {
       mobile: client.mobile,
       role: client.role,
       profileImage: toPublicProfileImage(client.profileImage),
-      rating: avgRating,
-      reviewCount: reviews.length,
+      rating: reviewSummary.rating,
+      reviewCount: reviewSummary.reviewCount,
+      reviews: reviewSummary.reviews,
       completedJobsCount,
       access: {
         hasHireConnection: Boolean(hireConnection),
@@ -1034,17 +1099,7 @@ exports.getFullUserProfile = async (req, res) => {
     }
 
     /* ================= REVIEWS ================= */
-    const reviews = await Review.findAll({
-      where: { toUserId: userId },
-      attributes: ["rating"],
-    });
-
-    const avgRating =
-      reviews.length > 0
-        ? (
-            reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length
-          ).toFixed(1)
-        : "0.0";
+    const reviewSummary = await getUserReceivedReviewSummary(userId);
 
     /* ================= ACTIVE TRAVEL PLAN ================= */
     const activePlan = user.travelPlans?.[0] || null;
@@ -1063,8 +1118,9 @@ exports.getFullUserProfile = async (req, res) => {
         description: user.TradesmanDetail?.shortBio || null,
 
         /* RATING */
-        rating: avgRating,
-        reviewCount: reviews.length,
+        rating: reviewSummary.rating,
+        reviewCount: reviewSummary.reviewCount,
+        reviews: reviewSummary.reviews,
 
         /* AVAILABILITY */
         availability: activePlan ? "Available" : "Not Available",
