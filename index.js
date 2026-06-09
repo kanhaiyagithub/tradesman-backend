@@ -8,6 +8,7 @@ const app = require('./app');
 const socket = require('./socket');
 const { refreshTravelPlanStatuses } = require('./services/travelPlanStatusService');
 const { startNotificationCleanupJob } = require('./services/notificationCleanupService');
+const { startMatchReminderEmailJob } = require('./services/emailReminderService');
 
 const server = http.createServer(app);
 socket.init(server);
@@ -38,6 +39,7 @@ server.listen(PORT, () => {
 
   refreshTravelPlanStatusesSafely();
   startNotificationCleanupJob();
+  startMatchReminderEmailJob();
 
   const statusRefreshTimer = setInterval(
     refreshTravelPlanStatusesSafely,

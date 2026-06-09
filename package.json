@@ -13,7 +13,9 @@
     "chat:backfill:dry": "node scripts/backfillConversations.js --dry-run",
     "chat:migrate:conversation-id:dry": "node scripts/migrateMessageConversationIds.js --dry-run",
     "chat:migrate:conversation-id": "node scripts/migrateMessageConversationIds.js",
-    "subscriptions:seed": "node scripts/createStripePlan.js"
+    "subscriptions:seed": "node scripts/createStripePlan.js",
+    "email:reminders": "node scripts/runMatchReminderEmails.js",
+    "email:test": "node scripts/sendTestEmail.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -27,7 +29,7 @@
     "morgan": "^1.10.0",
     "multer": "^2.0.2",
     "mysql2": "^3.15.3",
-    "nodemailer": "^7.0.10",
+    "nodemailer": "^7.0.13",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "sequelize": "^6.37.7",

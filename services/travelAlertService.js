@@ -3,6 +3,7 @@ const ClientTradeAlert = require("../models/clientTradeAlertModel");
 const TravelPlan = require("../models/locationModel");
 const TravelPlanAlertMatch = require("../models/travelPlanAlertMatchModel");
 const TradesmanDetails = require("../models/TradesmanDetails");
+const User = require("../models/User");
 const {
   sendPushNotification,
 } = require("../controllers/notificationController");
@@ -10,6 +11,9 @@ const {
   ACTIVE_TRAVEL_PLAN_STATUSES,
   refreshTravelPlanStatuses,
 } = require("./travelPlanStatusService");
+const {
+  sendTravelMatchCreatedEmails,
+} = require("./emailService");
 
 /**
  * Calculates the distance between two coordinates using the Haversine formula.
@@ -132,6 +136,42 @@ function isDateMatch(jobStartDate, jobEndDate, pointDateTime) {
   return true;
 }
 
+
+/**
+ * Normalizes travel plan stops from Sequelize/MySQL into an array.
+ *
+ * In some environments MySQL JSON columns are returned as a JSON string,
+ * while in others they are returned as an array. Matching must support both
+ * forms, otherwise stops are silently skipped and only start/destination match.
+ *
+ * @param {Array|String|null|undefined} rawStops - Raw travelPlan.stops value.
+ * @returns {Array<object>} Parsed stop objects.
+ */
+function normalizeTravelStops(rawStops) {
+  if (!rawStops) return [];
+
+  if (Array.isArray(rawStops)) return rawStops;
+
+  if (typeof rawStops === "string") {
+    try {
+      const parsed = JSON.parse(rawStops);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+      console.warn("[TRAVEL_ALERT] Failed to parse travel plan stops JSON", {
+        error: error.message,
+      });
+      return [];
+    }
+  }
+
+  // Sequelize JSON values can sometimes be wrapped in dataValues.
+  if (rawStops && Array.isArray(rawStops.dataValues)) {
+    return rawStops.dataValues;
+  }
+
+  return [];
+}
+
 /**
  * Builds all route points that can match a client alert: start, stops, and
  * destination. Each point carries the tradesman's expected arrival time.
@@ -162,8 +202,14 @@ function getTravelPoints(travelPlan) {
     });
   }
 
-  if (travelPlan.allowStops && Array.isArray(travelPlan.stops)) {
-    for (const stop of travelPlan.stops) {
+  const normalizedStops = normalizeTravelStops(travelPlan.stops);
+  const allowStopsEnabled =
+    travelPlan.allowStops === true ||
+    travelPlan.allowStops === 1 ||
+    travelPlan.allowStops === "1";
+
+  if (allowStopsEnabled && normalizedStops.length > 0) {
+    for (const stop of normalizedStops) {
       if (!stop || typeof stop !== "object") continue;
 
       if (
@@ -224,6 +270,9 @@ function findBestRoutePointForAlert(alert, travelPlan, logContext = null) {
     console.log("[TRAVEL_ALERT] Checking travel plan route points", {
       ...logContext,
       routePointCount: travelPoints.length,
+      allowStops: travelPlan.allowStops,
+      stopsType: Array.isArray(travelPlan.stops) ? "array" : typeof travelPlan.stops,
+      normalizedStopCount: normalizeTravelStops(travelPlan.stops).length,
     });
   }
 
@@ -400,6 +449,28 @@ async function createMatchAndNotify({ alert, travelPlan, bestMatch }) {
       matchId: match.id,
       clientId: alert.clientId,
       reason: pushResult.reason,
+    });
+  }
+
+  try {
+    const [client, tradesmanUser] = await Promise.all([
+      User.findByPk(alert.clientId),
+      User.findByPk(travelPlan.tradesmanId),
+    ]);
+
+    await sendTravelMatchCreatedEmails({
+      match,
+      alert,
+      travelPlan,
+      client,
+      tradesman: tradesmanUser,
+    });
+  } catch (emailError) {
+    console.error("[TRAVEL_ALERT] Match email notification failed", {
+      matchId: match.id,
+      clientId: alert.clientId,
+      tradesmanId: travelPlan.tradesmanId,
+      error: emailError.message,
     });
   }
 
@@ -707,6 +778,7 @@ async function matchClientTradeAlertWithTravelPlans(alert) {
 module.exports = {
   getDistanceKm,
   getTravelPoints,
+  normalizeTravelStops,
   isDateMatch,
   matchClientTradeAlertWithTravelPlans,
   matchTravelPlanWithAlerts,

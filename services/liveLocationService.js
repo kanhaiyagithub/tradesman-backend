@@ -3,6 +3,8 @@ const TradesmanDetails = require("../models/TradesmanDetails");
 const TravelPlan = require("../models/locationModel");
 const TradesmanLiveLocation = require("../models/TradesmanLiveLocation");
 const LiveProximityNotification = require("../models/LiveProximityNotification");
+const TravelPlanAlertMatch = require("../models/travelPlanAlertMatchModel");
+const User = require("../models/User");
 const {
   buildActiveOrUpcomingPlanWhere,
   refreshTravelPlanStatuses,
@@ -10,6 +12,9 @@ const {
 const {
   sendPushNotification,
 } = require("../controllers/notificationController");
+const {
+  sendTradesmanEnteredRadiusEmail,
+} = require("./emailService");
 
 const COOLDOWN_MINUTES = 30;
 
@@ -126,6 +131,25 @@ async function processLiveLocation({ tradesmanId, latitude, longitude }) {
         continue;
       }
 
+      const existingMatch = await TravelPlanAlertMatch.findOne({
+        where: {
+          travelPlanId: activeTravelPlan.id,
+          clientTradeAlertId: alert.id,
+          clientId: alert.clientId,
+          tradesmanId,
+        },
+      });
+
+      if (!existingMatch) {
+        console.log("[LIVE] Tradesman is inside radius but no stored match exists, skipping email-only match flow", {
+          tradesmanId,
+          travelPlanId: activeTravelPlan.id,
+          clientId: alert.clientId,
+          clientTradeAlertId: alert.id,
+        });
+        continue;
+      }
+
       matchedCount++;
 
       const existingNotification = await LiveProximityNotification.findOne({
@@ -197,6 +221,29 @@ async function processLiveLocation({ tradesmanId, latitude, longitude }) {
           clientTradeAlertId: alert.id,
           distanceKm: Number(distance.toFixed(2)),
         });
+
+        try {
+          const [client, tradesmanUser] = await Promise.all([
+            User.findByPk(alert.clientId),
+            User.findByPk(tradesmanId),
+          ]);
+
+          await sendTradesmanEnteredRadiusEmail({
+            alert,
+            travelPlan: activeTravelPlan,
+            client,
+            tradesman: tradesmanUser,
+            distanceKm: Number(distance.toFixed(2)),
+          });
+        } catch (emailError) {
+          console.error("[LIVE] Live proximity email failed", {
+            tradesmanId,
+            travelPlanId: activeTravelPlan.id,
+            clientId: alert.clientId,
+            clientTradeAlertId: alert.id,
+            error: emailError.message,
+          });
+        }
       } else {
         console.log("[LIVE] Push failed for live proximity", {
           tradesmanId,
