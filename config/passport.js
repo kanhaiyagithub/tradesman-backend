@@ -8,7 +8,9 @@ passport.use(
     {
       clientID: process.env.GOOGLE_CLIENT_ID,      // ✅ from .env
       clientSecret: process.env.GOOGLE_CLIENT_SECRET, // ✅ from .env
-      callbackURL: 'http://localhost:5000/api/auth/google/callback',
+      callbackURL:
+        process.env.GOOGLE_CALLBACK_URL ||
+        'http://localhost:5000/api/auth/google/callback',
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
@@ -20,7 +22,7 @@ passport.use(
             googleId: profile.id,
             name: profile.displayName,
             email: profile.emails?.[0]?.value,
-            profilePicture: profile.photos?.[0]?.value,
+            profileImage: profile.photos?.[0]?.value,
             provider: "google", 
             isVerified: true   // ✅ change this
   

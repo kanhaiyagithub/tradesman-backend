@@ -1,8 +1,10 @@
 const { Op } = require("sequelize");
 const TravelPlan = require("../models/locationModel");
+const { withJobLock } = require("./backgroundJobLockService");
 
 const TRAVEL_PLAN_STATUSES = ["open", "running", "closed"];
 const ACTIVE_TRAVEL_PLAN_STATUSES = ["open", "running"];
+const TRAVEL_PLAN_STATUS_LOCK = "tradesman:travel-plan-status-refresh";
 
 /**
  * Derives the persisted status for a travel plan from its travel window.
@@ -41,28 +43,37 @@ function getStatusForTravelWindow(startDateTime, destinationDateTime, now = new 
 async function refreshTravelPlanStatuses({ tradesmanId, now = new Date() } = {}) {
   const scopedWhere = tradesmanId ? { tradesmanId } : {};
 
-  await TravelPlan.update(
-    { status: "closed" },
-    {
-      where: {
-        ...scopedWhere,
-        status: { [Op.in]: ACTIVE_TRAVEL_PLAN_STATUSES },
-        destinationDateTime: { [Op.lt]: now },
+  const refresh = async () => {
+    await TravelPlan.update(
+      { status: "closed" },
+      {
+        where: {
+          ...scopedWhere,
+          status: { [Op.in]: ACTIVE_TRAVEL_PLAN_STATUSES },
+          destinationDateTime: { [Op.lt]: now },
+        },
       },
-    },
-  );
+    );
 
-  await TravelPlan.update(
-    { status: "running" },
-    {
-      where: {
-        ...scopedWhere,
-        status: "open",
-        startDateTime: { [Op.lte]: now },
-        destinationDateTime: { [Op.gte]: now },
+    await TravelPlan.update(
+      { status: "running" },
+      {
+        where: {
+          ...scopedWhere,
+          status: "open",
+          startDateTime: { [Op.lte]: now },
+          destinationDateTime: { [Op.gte]: now },
+        },
       },
-    },
-  );
+    );
+  };
+
+  if (tradesmanId) {
+    await refresh();
+    return { skipped: false };
+  }
+
+  return withJobLock(TRAVEL_PLAN_STATUS_LOCK, refresh);
 }
 
 /**

@@ -1,6 +1,8 @@
 const jwt = require("jsonwebtoken");
 const { processLiveLocation } = require("./services/liveLocationService");
 const chatService = require("./services/chatService");
+const { isOriginAllowed } = require("./utils/securityConfig");
+const { parseLiveCoordinates } = require("./utils/liveLocationValidation");
 
 let io = null;
 
@@ -11,6 +13,18 @@ const onlineUsers = new Map();
 const liveLocationThrottle = new Map();
 
 const LIVE_LOCATION_MIN_INTERVAL_MS = 5000;
+
+const validateSocketLiveLocation = (user, payload = {}) => {
+  if (!user?.id) {
+    return { success: false, message: "Unauthorized socket user" };
+  }
+
+  if (user.role !== "tradesman") {
+    return { success: false, message: "Only tradesmen can update live location" };
+  }
+
+  return parseLiveCoordinates(payload);
+};
 
 const addSocketForUser = (userId, socketId) => {
   const normalizedUserId = String(userId || "").trim();
@@ -59,8 +73,15 @@ module.exports = {
 
     io = new Server(server, {
       cors: {
-        origin: "*",
+        origin(origin, callback) {
+          if (isOriginAllowed(origin)) {
+            return callback(null, true);
+          }
+
+          return callback(new Error("Socket origin is not allowed"));
+        },
         methods: ["GET", "POST"],
+        credentials: true,
       },
     });
 
@@ -182,39 +203,11 @@ module.exports = {
       socket.on("live-location:update", async (payload = {}, ack) => {
         try {
           const tradesmanId = socket.user?.id;
-          const { latitude, longitude } = payload;
 
-          if (!tradesmanId) {
+          const validation = validateSocketLiveLocation(socket.user, payload);
+          if (!validation.success) {
             if (typeof ack === "function") {
-              ack({ success: false, message: "Unauthorized socket user" });
-            }
-            return;
-          }
-
-          if (
-            latitude === undefined ||
-            latitude === null ||
-            longitude === undefined ||
-            longitude === null
-          ) {
-            if (typeof ack === "function") {
-              ack({
-                success: false,
-                message: "latitude and longitude are required",
-              });
-            }
-            return;
-          }
-
-          const lat = Number(latitude);
-          const lng = Number(longitude);
-
-          if (Number.isNaN(lat) || Number.isNaN(lng)) {
-            if (typeof ack === "function") {
-              ack({
-                success: false,
-                message: "latitude and longitude must be valid numbers",
-              });
+              ack({ success: false, message: validation.message });
             }
             return;
           }
@@ -240,8 +233,8 @@ module.exports = {
 
           const result = await processLiveLocation({
             tradesmanId,
-            latitude: lat,
-            longitude: lng,
+            latitude: validation.latitude,
+            longitude: validation.longitude,
           });
 
           if (typeof ack === "function") {
@@ -280,4 +273,5 @@ module.exports = {
 
   getOnlineUsers: () => onlineUsers,
   emitToUser,
+  validateSocketLiveLocation,
 };

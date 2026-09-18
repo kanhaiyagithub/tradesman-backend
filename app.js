@@ -3,8 +3,8 @@ const dotenv = require('dotenv');
 const cors = require('cors');
 const session = require('express-session');
 const passport = require('passport');
-const path = require('path');
 const storageConfig = require('./config/storage');
+const { isOriginAllowed } = require('./utils/securityConfig');
 
 // dotenv.config({ path: './config/config.env' });
 dotenv.config();
@@ -32,7 +32,18 @@ const matchRoutes = require('./routes/matchRoutes');
 
 const app = express();
 
-app.use(cors());
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (isOriginAllowed(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error('CORS origin is not allowed'));
+    },
+    credentials: true,
+  })
+);
 
 /* ===========================
    STRIPE WEBHOOK FIRST

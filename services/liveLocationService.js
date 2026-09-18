@@ -1,4 +1,5 @@
 const ClientTradeAlert = require("../models/clientTradeAlertModel");
+const { Op } = require("sequelize");
 const TradesmanDetails = require("../models/TradesmanDetails");
 const TravelPlan = require("../models/locationModel");
 const TradesmanLiveLocation = require("../models/TradesmanLiveLocation");
@@ -17,6 +18,7 @@ const {
 } = require("./emailService");
 
 const COOLDOWN_MINUTES = 30;
+const LIVE_MATCH_BATCH_LIMIT = Number(process.env.LIVE_MATCH_BATCH_LIMIT || 200);
 
 function getDistanceKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
@@ -43,6 +45,58 @@ function isCooldownActive(lastNotifiedAt) {
   const now = Date.now();
 
   return now - lastTime < COOLDOWN_MINUTES * 60 * 1000;
+}
+
+function buildActiveAlertWhere({ alertIds, tradeTypeId, now = new Date() }) {
+  return {
+    id: { [Op.in]: alertIds },
+    isActive: true,
+    tradeTypeId,
+    [Op.and]: [
+      {
+        [Op.or]: [
+          { startDate: null },
+          { startDate: { [Op.lte]: now } },
+        ],
+      },
+      {
+        [Op.or]: [
+          { endDate: null },
+          { endDate: { [Op.gte]: now } },
+        ],
+      },
+    ],
+  };
+}
+
+async function getCandidateLiveMatches({ travelPlanId, tradesmanId, tradeTypeId, now }) {
+  const matches = await TravelPlanAlertMatch.findAll({
+    where: {
+      travelPlanId,
+      tradesmanId,
+      status: { [Op.ne]: "ignored" },
+    },
+    order: [["id", "DESC"]],
+    limit: LIVE_MATCH_BATCH_LIMIT,
+  });
+
+  if (!matches.length) {
+    return [];
+  }
+
+  const alertIds = [...new Set(matches.map((match) => match.clientTradeAlertId))];
+  const alerts = await ClientTradeAlert.findAll({
+    where: buildActiveAlertWhere({ alertIds, tradeTypeId, now }),
+  });
+
+  const alertsById = new Map(alerts.map((alert) => [Number(alert.id), alert]));
+
+  return matches
+    .map((match) => ({
+      match,
+      alert: alertsById.get(Number(match.clientTradeAlertId)) || null,
+    }))
+    .filter((item) => item.alert);
 }
 
 async function processLiveLocation({ tradesmanId, latitude, longitude }) {
@@ -98,18 +152,18 @@ async function processLiveLocation({ tradesmanId, latitude, longitude }) {
     travelPlanId: activeTravelPlan.id,
   });
 
-  const alerts = await ClientTradeAlert.findAll({
-    where: {
-      isActive: true,
-      tradeTypeId,
-    },
+  const candidateMatches = await getCandidateLiveMatches({
+    travelPlanId: activeTravelPlan.id,
+    tradesmanId,
+    tradeTypeId,
+    now,
   });
 
   let matchedCount = 0;
   let notifiedCount = 0;
   let cooldownSkippedCount = 0;
 
-  for (const alert of alerts) {
+  for (const { alert, match: existingMatch } of candidateMatches) {
     try {
       const distance = getDistanceKm(
         Number(alert.latitude),
@@ -128,25 +182,6 @@ async function processLiveLocation({ tradesmanId, latitude, longitude }) {
       });
 
       if (distance > Number(alert.radiusKm)) {
-        continue;
-      }
-
-      const existingMatch = await TravelPlanAlertMatch.findOne({
-        where: {
-          travelPlanId: activeTravelPlan.id,
-          clientTradeAlertId: alert.id,
-          clientId: alert.clientId,
-          tradesmanId,
-        },
-      });
-
-      if (!existingMatch) {
-        console.log("[LIVE] Tradesman is inside radius but no stored match exists, skipping email-only match flow", {
-          tradesmanId,
-          travelPlanId: activeTravelPlan.id,
-          clientId: alert.clientId,
-          clientTradeAlertId: alert.id,
-        });
         continue;
       }
 
@@ -266,6 +301,7 @@ async function processLiveLocation({ tradesmanId, latitude, longitude }) {
   return {
     success: true,
     travelPlanId: activeTravelPlan.id,
+    candidateMatchCount: candidateMatches.length,
     matchedCount,
     notifiedCount,
     cooldownSkippedCount,
@@ -273,5 +309,7 @@ async function processLiveLocation({ tradesmanId, latitude, longitude }) {
 }
 
 module.exports = {
+  buildActiveAlertWhere,
+  getCandidateLiveMatches,
   processLiveLocation,
 };

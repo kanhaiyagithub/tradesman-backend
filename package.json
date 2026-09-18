@@ -5,10 +5,12 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
+    "test": "node --test",
     "db:check": "node scripts/dbCheck.js",
     "db:migrate": "node scripts/migrate.js up",
     "db:migrate:down": "node scripts/migrate.js down",
     "db:migrate:status": "node scripts/migrate.js status",
+    "jobs:worker": "node scripts/runBackgroundJobs.js",
     "chat:backfill": "node scripts/backfillConversations.js",
     "chat:backfill:dry": "node scripts/backfillConversations.js --dry-run",
     "chat:migrate:conversation-id:dry": "node scripts/migrateMessageConversationIds.js --dry-run",

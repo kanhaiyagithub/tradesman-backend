@@ -38,6 +38,21 @@ const sendResponse = (
   return res.status(statusCode).json({ success, message, data, error });
 };
 
+const sanitizeUserPayload = (userPayload) => {
+  if (!userPayload) {
+    return null;
+  }
+
+  const {
+    password,
+    resetPasswordToken,
+    resetPasswordExpires,
+    ...safePayload
+  } = userPayload;
+
+  return safePayload;
+};
+
 /**
  * Resolves a stored profile image key or legacy value into a public URL.
  *
@@ -77,9 +92,11 @@ const serializeUserMedia = (userPayload) => {
     return null;
   }
 
+  const safePayload = sanitizeUserPayload(userPayload);
+
   return {
-    ...userPayload,
-    profileImage: toPublicProfileImage(userPayload.profileImage),
+    ...safePayload,
+    profileImage: toPublicProfileImage(safePayload.profileImage),
   };
 };
 
@@ -210,6 +227,49 @@ const signToken = (user) => {
     process.env.JWT_SECRET,
     { expiresIn: "7d" },
   );
+};
+
+const PASSWORD_RESET_OTP_TTL_MS = 10 * 60 * 1000;
+const PASSWORD_RESET_TOKEN_TTL_MS = 15 * 60 * 1000;
+const PASSWORD_RESET_OTP_PREFIX = "otp:";
+const PASSWORD_RESET_TOKEN_PREFIX = "reset:";
+
+const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
+
+const generatePasswordResetOtp = () =>
+  String(crypto.randomInt(100000, 1000000));
+
+const hashPasswordResetSecret = (value) =>
+  crypto.createHash("sha256").update(String(value)).digest("hex");
+
+const buildPasswordResetOtpEmail = ({ name, otp }) => {
+  const displayName = name || "there";
+  const expiryMinutes = Math.floor(PASSWORD_RESET_OTP_TTL_MS / 60 / 1000);
+
+  return {
+    subject: "Your Touring Trades password reset code",
+    text: [
+      `Hi ${displayName},`,
+      "",
+      `Your Touring Trades password reset code is ${otp}.`,
+      `This code expires in ${expiryMinutes} minutes.`,
+      "",
+      "If you did not request a password reset, you can safely ignore this email.",
+      "",
+      "Thanks,",
+      "The Touring Trades Team",
+    ].join("\n"),
+    html: `
+      <div style="font-family: Arial, sans-serif; color: #1f2937; line-height: 1.5;">
+        <p>Hi ${displayName},</p>
+        <p>Use the verification code below to reset your Touring Trades password.</p>
+        <p style="font-size: 28px; letter-spacing: 6px; font-weight: 700; margin: 24px 0;">${otp}</p>
+        <p>This code expires in ${expiryMinutes} minutes.</p>
+        <p>If you did not request a password reset, you can safely ignore this email.</p>
+        <p>Thanks,<br />The Touring Trades Team</p>
+      </div>
+    `,
+  };
 };
 
 /**
@@ -493,6 +553,12 @@ exports.login = async (req, res) => {
         .json({ success: false, message: "Invalid email or password" });
     }
 
+    if (!user.password) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Please continue with Google login" });
+    }
+
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res
@@ -684,6 +750,10 @@ exports.getAllClients = async (req, res) => {
       return sendResponse(res, 404, false, "No clients found");
     }
 
+    result.rows = result.rows.map((row) =>
+      serializeUserMedia(row.toJSON())
+    );
+
     return paginatedResponse(res, "Clients fetched", result, page, limit);
   } catch (error) {
     console.error("Fetch Clients Error:", error);
@@ -737,7 +807,6 @@ exports.updateProfile = async (req, res) => {
       shortBio,
       licenseNumber,
       licenseExpiry,
-      isApproved,
     } = req.body;
 
     // -------- USERS TABLE (OPTIONAL FIELDS) --------
@@ -790,7 +859,6 @@ exports.updateProfile = async (req, res) => {
       if (shortBio !== undefined) tradesman.shortBio = shortBio;
       if (licenseNumber !== undefined) tradesman.licenseNumber = licenseNumber;
       if (licenseExpiry !== undefined) tradesman.licenseExpiry = licenseExpiry;
-      if (isApproved !== undefined) tradesman.isApproved = isApproved;
 
       await tradesman.save();
     }
@@ -821,6 +889,14 @@ exports.updateProfile = async (req, res) => {
 
 exports.deleteUser = async (req, res) => {
   try {
+    const requestedUserId = Number(req.params.id);
+    const authenticatedUserId = Number(req.user?.id);
+    const isAdmin = req.user?.role === "admin";
+
+    if (!isAdmin && authenticatedUserId !== requestedUserId) {
+      return sendResponse(res, 403, false, "You can only delete your own account");
+    }
+
     const user = await User.findByPk(req.params.id);
 
     if (!user) return sendResponse(res, 404, false, "User not found");
@@ -835,28 +911,77 @@ exports.deleteUser = async (req, res) => {
 
 exports.forgotPassword = async (req, res) => {
   try {
-    const { email } = req.body;
+    const email = normalizeEmail(req.body.email);
 
     if (!email) return sendResponse(res, 400, false, "Email is required");
 
-    const user = await User.findOne({ where: { email } });
-    if (!user) return sendResponse(res, 404, false, "User not found");
+    const genericMessage =
+      "If an account exists for this email, a password reset code has been sent";
 
-    const token = crypto.randomBytes(32).toString("hex");
-    const expiry = new Date(Date.now() + 15 * 60 * 1000);
+    const user = await User.findOne({ where: { email } });
+    if (!user) return sendResponse(res, 200, true, genericMessage);
+
+    const otp = generatePasswordResetOtp();
+    const expiry = new Date(Date.now() + PASSWORD_RESET_OTP_TTL_MS);
 
     await user.update({
-      resetPasswordToken: token,
+      resetPasswordToken: `${PASSWORD_RESET_OTP_PREFIX}${hashPasswordResetSecret(otp)}`,
       resetPasswordExpires: expiry,
     });
 
-    const resetLink = `${process.env.FRONTEND_URL}/reset-password/${token}`;
+    const emailContent = buildPasswordResetOtpEmail({
+      name: user.name,
+      otp,
+    });
 
-    console.log("Reset Link:", resetLink);
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: user.email,
+      subject: emailContent.subject,
+      text: emailContent.text,
+      html: emailContent.html,
+    });
 
-    return sendResponse(res, 200, true, "Password reset link sent", resetLink);
+    return sendResponse(res, 200, true, genericMessage);
   } catch (err) {
     console.error("Forgot Error:", err);
+    return sendResponse(res, 500, false, "Server error");
+  }
+};
+
+exports.verifyResetOtp = async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body.email);
+    const otp = String(req.body.otp || "").trim();
+
+    if (!email) return sendResponse(res, 400, false, "Email is required");
+    if (!/^\d{6}$/.test(otp)) {
+      return sendResponse(res, 400, false, "OTP must be a 6 digit code");
+    }
+
+    const user = await User.findOne({
+      where: {
+        email,
+        resetPasswordToken: `${PASSWORD_RESET_OTP_PREFIX}${hashPasswordResetSecret(otp)}`,
+        resetPasswordExpires: { [Op.gt]: new Date() },
+      },
+    });
+
+    if (!user) return sendResponse(res, 400, false, "Invalid or expired OTP");
+
+    const resetToken = crypto.randomBytes(32).toString("hex");
+
+    await user.update({
+      resetPasswordToken: `${PASSWORD_RESET_TOKEN_PREFIX}${resetToken}`,
+      resetPasswordExpires: new Date(Date.now() + PASSWORD_RESET_TOKEN_TTL_MS),
+    });
+
+    return sendResponse(res, 200, true, "OTP verified", {
+      resetToken,
+      expiresInMinutes: Math.floor(PASSWORD_RESET_TOKEN_TTL_MS / 60 / 1000),
+    });
+  } catch (error) {
+    console.error("Verify Reset OTP Error:", error);
     return sendResponse(res, 500, false, "Server error");
   }
 };
@@ -866,9 +991,21 @@ exports.resetPassword = async (req, res) => {
     const { token } = req.params;
     const { newPassword } = req.body;
 
+    if (!token) return sendResponse(res, 400, false, "Reset token is required");
+    if (!newPassword || String(newPassword).length < 8) {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "New password must be at least 8 characters"
+      );
+    }
+
     const user = await User.findOne({
       where: {
-        resetPasswordToken: token,
+        resetPasswordToken: {
+          [Op.in]: [token, `${PASSWORD_RESET_TOKEN_PREFIX}${token}`],
+        },
         resetPasswordExpires: { [Op.gt]: new Date() },
       },
     });

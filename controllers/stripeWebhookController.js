@@ -5,6 +5,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const UserSubscription = require("../models/UserSubscription");
 const SubscriptionPlan = require("../models/SubscriptionPlan");
+const StripeWebhookEvent = require("../models/StripeWebhookEvent");
 
 const fromUnix = (value) => (value ? new Date(value * 1000) : null);
 
@@ -94,6 +95,11 @@ exports.handleWebhook = async (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
 
+  if (!process.env.STRIPE_WEBHOOK_SECRET) {
+    console.error("Stripe webhook secret is not configured");
+    return res.status(500).json({ error: "Stripe webhook is not configured" });
+  }
+
   try {
     event = stripe.webhooks.constructEvent(
       req.body,
@@ -109,6 +115,18 @@ exports.handleWebhook = async (req, res) => {
   console.log("Stripe webhook received:", event.type);
 
   try {
+    const [webhookEvent, created] = await StripeWebhookEvent.findOrCreate({
+      where: { eventId: event.id },
+      defaults: {
+        eventId: event.id,
+        eventType: event.type,
+      },
+    });
+
+    if (!created && webhookEvent.processedAt) {
+      return res.json({ received: true, duplicate: true });
+    }
+
     switch (event.type) {
       case "checkout.session.completed": {
         const userId = Number(
@@ -175,11 +193,21 @@ exports.handleWebhook = async (req, res) => {
         console.log("Unhandled webhook event:", event.type);
     }
 
+    await webhookEvent.update({
+      eventType: event.type,
+      processedAt: new Date(),
+    });
+
     return res.json({ received: true });
   } catch (error) {
     console.error("Webhook processing failed:", error);
     return res.status(500).json({ error: "Webhook processing failed" });
   }
+};
+
+module.exports._private = {
+  findLocalSubscription,
+  syncSubscriptionFromStripe,
 };
 
 

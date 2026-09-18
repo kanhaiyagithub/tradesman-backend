@@ -1,6 +1,5 @@
 const TradesmanDetails = require("../models/TradesmanDetails");
 const User = require("../models/User");
-const transporter = require("../config/email");
 const { Op } = require("sequelize");
 const { sendPushNotification } = require("./notificationController");
 
@@ -8,13 +7,111 @@ const send = (res, code, success, message, data = null) =>
   res.status(code).json({ success, message, data });
 
 const parsePagination = (req) => {
-  const page = Math.max(parseInt(req.query.page || 1), 1);
-  const limit = Math.min(Math.max(parseInt(req.query.limit || 10), 1), 100);
+  const page = Math.max(parseInt(req.query.page || 1, 10), 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit || 10, 10), 1), 100);
   const offset = (page - 1) * limit;
   return { page, limit, offset };
 };
 
-// ✅ GET PENDING
+const sanitizeUser = (user) => {
+  if (!user) {
+    return null;
+  }
+
+  const payload = typeof user.toJSON === "function" ? user.toJSON() : user;
+  const {
+    password,
+    resetPasswordToken,
+    resetPasswordExpires,
+    ...safePayload
+  } = payload;
+
+  return safePayload;
+};
+
+const serializeDetails = (details) => {
+  if (!details) {
+    return null;
+  }
+
+  const payload = typeof details.toJSON === "function" ? details.toJSON() : details;
+  const { User: legacyUser, user, ...detailsPayload } = payload;
+
+  return {
+    ...detailsPayload,
+    user: sanitizeUser(user || legacyUser),
+  };
+};
+
+const parseUserId = (value) => {
+  const userId = Number(value);
+  return Number.isInteger(userId) && userId > 0 ? userId : null;
+};
+
+const normalizeOptionalString = (value) => {
+  if (value === undefined || value === null) {
+    return "";
+  }
+
+  return String(value).trim();
+};
+
+const hasPortfolioPhotos = (portfolioPhotos) => {
+  if (Array.isArray(portfolioPhotos)) {
+    return portfolioPhotos.length > 0;
+  }
+
+  if (typeof portfolioPhotos === "string") {
+    try {
+      const parsed = JSON.parse(portfolioPhotos);
+      return Array.isArray(parsed) && parsed.length > 0;
+    } catch (error) {
+      return portfolioPhotos.trim().length > 0;
+    }
+  }
+
+  return false;
+};
+
+const validateApprovalReadiness = (details) => {
+  const missing = [];
+
+  if (!details.tradeTypeId) missing.push("tradeTypeId");
+  if (!normalizeOptionalString(details.tradeType)) missing.push("tradeType");
+  if (!normalizeOptionalString(details.businessName)) missing.push("businessName");
+  if (!normalizeOptionalString(details.shortBio)) missing.push("shortBio");
+  if (!normalizeOptionalString(details.licenseNumber)) missing.push("licenseNumber");
+  if (!details.licenseExpiry) missing.push("licenseExpiry");
+  if (!normalizeOptionalString(details.licenseDocument)) missing.push("licenseDocument");
+  if (!hasPortfolioPhotos(details.portfolioPhotos)) missing.push("portfolioPhotos");
+
+  return missing;
+};
+
+const getTradesmanDetailsForAdmin = async (userId) =>
+  TradesmanDetails.findOne({
+    where: { userId },
+    include: [
+      {
+        model: User,
+        as: "user",
+        where: { role: "tradesman" },
+        attributes: [
+          "id",
+          "name",
+          "email",
+          "mobile",
+          "role",
+          "isVerified",
+          "profileImage",
+          "createdAt",
+          "updatedAt",
+        ],
+        required: true,
+      },
+    ],
+  });
+
 async function getPending(req, res) {
   try {
     const { page, limit, offset } = parsePagination(req);
@@ -22,9 +119,22 @@ async function getPending(req, res) {
 
     const whereDetail = { isApproved: false };
     if (tradeTypeId) {
-      whereDetail.tradeTypeId = Number(tradeTypeId);
+      const parsedTradeTypeId = Number(tradeTypeId);
+      if (!Number.isInteger(parsedTradeTypeId) || parsedTradeTypeId <= 0) {
+        return send(res, 400, false, "tradeTypeId must be a positive integer");
+      }
+
+      whereDetail.tradeTypeId = parsedTradeTypeId;
     } else if (tradeType) {
       whereDetail.tradeType = tradeType;
+    }
+
+    const userWhere = { role: "tradesman" };
+    if (search) {
+      userWhere[Op.or] = [
+        { name: { [Op.like]: `%${search}%` } },
+        { email: { [Op.like]: `%${search}%` } },
+      ];
     }
 
     const result = await TradesmanDetails.findAndCountAll({
@@ -32,15 +142,10 @@ async function getPending(req, res) {
       include: [
         {
           model: User,
+          as: "user",
           attributes: ["id", "name", "email", "mobile", "role", "isVerified"],
-          where: search
-            ? {
-                [Op.or]: [
-                  { name: { [Op.iLike]: `%${search}%` } },
-                  { email: { [Op.iLike]: `%${search}%` } },
-                ],
-              }
-            : undefined,
+          where: userWhere,
+          required: true,
         },
       ],
       order: [["createdAt", "DESC"]],
@@ -50,7 +155,7 @@ async function getPending(req, res) {
 
     return send(res, 200, true, "Pending tradesmen fetched", {
       meta: { total: result.count, page, perPage: limit },
-      data: result.rows,
+      data: result.rows.map(serializeDetails),
     });
   } catch (err) {
     console.error(err);
@@ -58,17 +163,31 @@ async function getPending(req, res) {
   }
 }
 
-// ✅ APPROVE
 async function approve(req, res) {
   try {
-    const { userId } = req.params;
+    const userId = parseUserId(req.params.userId);
+    if (!userId) {
+      return send(res, 400, false, "userId must be a positive integer");
+    }
 
-    const details = await TradesmanDetails.findOne({ where: { userId } });
+    const details = await getTradesmanDetailsForAdmin(userId);
     if (!details) return send(res, 404, false, "Tradesman details not found");
+
+    if (details.isApproved) {
+      return send(res, 400, false, "Tradesman is already approved");
+    }
+
+    const missingFields = validateApprovalReadiness(details);
+    if (missingFields.length) {
+      return send(res, 400, false, "Tradesman profile is incomplete", {
+        missingFields,
+      });
+    }
 
     details.isApproved = true;
     details.approvedBy = req.user.id;
     details.approvedAt = new Date();
+    details.rejectionReason = null;
     await details.save();
 
     const user = await User.findByPk(userId);
@@ -77,29 +196,45 @@ async function approve(req, res) {
       await user.save();
     }
 
-    // 🔥 PUSH NOTIFICATION (to USER)
     sendPushNotification(
       userId,
-      "Profile Approved! 🎉",
+      "Profile Approved",
       "Congratulations! Your tradesman profile has been approved. You can now start receiving hire requests.",
-      { type: "PROFILE_APPROVED" },
+      { type: "PROFILE_APPROVED" }
     );
 
-    return send(res, 200, true, "Tradesman approved", { user, details });
+    return send(res, 200, true, "Tradesman approved", {
+      user: sanitizeUser(user),
+      details: serializeDetails(details),
+    });
   } catch (err) {
     console.error(err);
     return send(res, 500, false, "Server error");
   }
 }
 
-// ✅ REJECT
 async function reject(req, res) {
   try {
-    const { userId } = req.params;
-    const { reason } = req.body;
+    const userId = parseUserId(req.params.userId);
+    if (!userId) {
+      return send(res, 400, false, "userId must be a positive integer");
+    }
 
-    const details = await TradesmanDetails.findOne({ where: { userId } });
+    const reason = normalizeOptionalString(req.body?.reason);
+    if (!reason) {
+      return send(res, 400, false, "Rejection reason is required");
+    }
+
+    if (reason.length > 500) {
+      return send(res, 400, false, "Rejection reason must be 500 characters or less");
+    }
+
+    const details = await getTradesmanDetailsForAdmin(userId);
     if (!details) return send(res, 404, false, "Tradesman details not found");
+
+    if (details.isApproved) {
+      return send(res, 400, false, "Approved tradesmen cannot be rejected from this endpoint");
+    }
 
     details.isApproved = false;
     details.rejectionReason = reason;
@@ -113,33 +248,34 @@ async function reject(req, res) {
       await user.save();
     }
 
-    // 🔥 PUSH NOTIFICATION (to USER)
     sendPushNotification(
       userId,
       "Profile Update",
-      `Your tradesman application was not approved. Reason: ${reason || "No reason provided."}`,
-      { type: "PROFILE_REJECTED", reason: reason || "" },
+      `Your tradesman application was not approved. Reason: ${reason}`,
+      { type: "PROFILE_REJECTED", reason }
     );
 
-    return send(res, 200, true, "Tradesman rejected", { user, details });
+    return send(res, 200, true, "Tradesman rejected", {
+      user: sanitizeUser(user),
+      details: serializeDetails(details),
+    });
   } catch (err) {
     console.error(err);
     return send(res, 500, false, "Server error");
   }
 }
 
-// ✅ GET ONE
 async function getOne(req, res) {
   try {
-    const { userId } = req.params;
+    const userId = parseUserId(req.params.userId);
+    if (!userId) {
+      return send(res, 400, false, "userId must be a positive integer");
+    }
 
-    const details = await TradesmanDetails.findOne({
-      where: { userId },
-      include: [{ model: User }],
-    });
+    const details = await getTradesmanDetailsForAdmin(userId);
 
     if (!details) return send(res, 404, false, "Not found");
-    return send(res, 200, true, "Fetched", details);
+    return send(res, 200, true, "Fetched", serializeDetails(details));
   } catch (err) {
     console.error(err);
     return send(res, 500, false, "Server error");

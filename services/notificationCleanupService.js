@@ -1,6 +1,8 @@
 const { deleteExpiredNotifications } = require("./notificationService");
+const { withJobLock } = require("./backgroundJobLockService");
 
 const DEFAULT_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const NOTIFICATION_CLEANUP_LOCK = "tradesman:notification-cleanup";
 
 /**
  * Deletes expired notifications and logs the result without crashing the app.
@@ -9,7 +11,20 @@ const DEFAULT_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
  */
 const deleteExpiredNotificationsSafely = async () => {
   try {
-    const deletedCount = await deleteExpiredNotifications();
+    const lockResult = await withJobLock(
+      NOTIFICATION_CLEANUP_LOCK,
+      deleteExpiredNotifications,
+    );
+
+    if (lockResult.skipped) {
+      console.log("[NOTIFICATION CLEANUP] Skipped cleanup", {
+        reason: lockResult.reason,
+        at: new Date().toISOString(),
+      });
+      return;
+    }
+
+    const deletedCount = lockResult.result;
 
     if (deletedCount > 0) {
       console.log("[NOTIFICATION CLEANUP] Deleted expired notifications", {

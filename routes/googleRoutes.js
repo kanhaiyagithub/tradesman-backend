@@ -1,6 +1,7 @@
 const express = require('express');
 const passport = require('passport');
 const { googleCallback, googleMobileLogin } = require('../controllers/googleAuthController');
+const { authRateLimiter } = require('../middlewares/rateLimitMiddleware');
 
 const router = express.Router();
 
@@ -17,6 +18,6 @@ router.get(
 );
 
 // Flutter mobile login
-router.post('/google/mobile', googleMobileLogin);
+router.post('/google/mobile', authRateLimiter, googleMobileLogin);
 
 module.exports = router;

@@ -11,6 +11,8 @@ router.post("/request", verifyToken, hireController.requestHire);
 // Tradesman → accept / reject
 router.post("/respond", verifyToken, hireController.respondHire);
 
+router.post("/cancel", verifyToken, hireController.cancelHire);
+
 // Tradesman → request job completion
 router.post("/request-complete", verifyToken, hireController.requestJobCompletion);
 

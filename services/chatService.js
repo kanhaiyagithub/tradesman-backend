@@ -13,6 +13,7 @@ const storageService = require('./storage/storageService');
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
+const MAX_MESSAGE_LENGTH = Number(process.env.CHAT_MAX_MESSAGE_LENGTH || 5000);
 
 /**
  * Normalizes offset-based pagination input for endpoints that must remain
@@ -275,6 +276,10 @@ const sendDirectMessage = async ({ senderId, receiverId, message }) => {
 
     if (!normalizedMessage) {
       throw new Error('message is required');
+    }
+
+    if (normalizedMessage.length > MAX_MESSAGE_LENGTH) {
+      throw new Error(`message must be ${MAX_MESSAGE_LENGTH} characters or less`);
     }
 
     if (normalizedSenderId === normalizedReceiverId) {
@@ -607,6 +612,7 @@ const markConversationRead = async ({ userId, conversationWith }) => {
 
 module.exports = {
   buildConversationKey,
+  MAX_MESSAGE_LENGTH,
   sendDirectMessage,
   getConversationMessages,
   getChatList,

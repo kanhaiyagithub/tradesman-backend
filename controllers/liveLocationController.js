@@ -1,9 +1,18 @@
 const { processLiveLocation } = require("../services/liveLocationService");
+const { parseLiveCoordinates } = require("../utils/liveLocationValidation");
 
 exports.updateLiveLocation = async (req, res) => {
   try {
     const tradesmanId = req.user.id;
+    const role = req.user.role;
     const { latitude, longitude } = req.body;
+
+    if (role !== "tradesman") {
+      return res.status(403).json({
+        success: false,
+        message: "Only tradesmen can update live location",
+      });
+    }
 
     if (
       latitude === undefined ||
@@ -17,20 +26,18 @@ exports.updateLiveLocation = async (req, res) => {
       });
     }
 
-    const lat = Number(latitude);
-    const lng = Number(longitude);
-
-    if (Number.isNaN(lat) || Number.isNaN(lng)) {
+    const parsedCoordinates = parseLiveCoordinates({ latitude, longitude });
+    if (!parsedCoordinates.success) {
       return res.status(400).json({
         success: false,
-        message: "latitude and longitude must be valid numbers",
+        message: parsedCoordinates.message,
       });
     }
 
     const result = await processLiveLocation({
       tradesmanId,
-      latitude: lat,
-      longitude: lng,
+      latitude: parsedCoordinates.latitude,
+      longitude: parsedCoordinates.longitude,
     });
 
     return res.json({
@@ -45,8 +52,7 @@ exports.updateLiveLocation = async (req, res) => {
     });
     return res.status(500).json({
       success: false,
-      message: error.message
-    //   message: "Failed to process live location",
+      message: "Failed to process live location",
     });
   }
 };

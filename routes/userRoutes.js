@@ -3,10 +3,15 @@ const router = express.Router();
 const userController = require('../controllers/userController');
 const { verifyToken } = require('../middlewares/authMiddleware');
 const { upload, convertToJpg } = require('../middlewares/uploadMiddleware');
+const {
+  authRateLimiter,
+  passwordResetRateLimiter,
+} = require('../middlewares/rateLimitMiddleware');
 
 // Public Routes
 router.post(
   '/register',
+  authRateLimiter,
   upload.fields([
     { name: 'profileImage', maxCount: 1 },
     { name: 'licenseDocument', maxCount: 1 },
@@ -16,7 +21,7 @@ router.post(
   userController.register
 );
 
-router.post('/login', userController.login);
+router.post('/login', authRateLimiter, userController.login);
 
 // Lists
 router.get('/tradesmen', userController.getAllTradesmen);
@@ -58,8 +63,9 @@ router.get('/:id', userController.getUserById);
 router.delete('/:id', verifyToken, userController.deleteUser);
 
 // Password reset
-router.post('/forgot-password', userController.forgotPassword);
-router.post('/reset-password/:token', userController.resetPassword);
+router.post('/forgot-password', passwordResetRateLimiter, userController.forgotPassword);
+router.post('/verify-reset-otp', passwordResetRateLimiter, userController.verifyResetOtp);
+router.post('/reset-password/:token', passwordResetRateLimiter, userController.resetPassword);
 
 
 

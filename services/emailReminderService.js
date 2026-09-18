@@ -2,6 +2,9 @@ const { Op } = require("sequelize");
 const TravelPlanAlertMatch = require("../models/travelPlanAlertMatchModel");
 const User = require("../models/User");
 const { sendMatchReminderEmail } = require("./emailService");
+const { withJobLock } = require("./backgroundJobLockService");
+
+const MATCH_REMINDER_LOCK = "tradesman:match-reminder-emails";
 
 function startOfDay(date) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
@@ -103,29 +106,41 @@ async function sendReminderBatch({ type, reminderLabel, targetDate }) {
 }
 
 async function runMatchReminderEmails(now = new Date()) {
-  console.log("[EMAIL_REMINDER] Running match reminder email job", {
-    now: now.toISOString(),
+  const lockResult = await withJobLock(MATCH_REMINDER_LOCK, async () => {
+    console.log("[EMAIL_REMINDER] Running match reminder email job", {
+      now: now.toISOString(),
+    });
+
+    const oneDayTarget = addDays(now, 1);
+
+    const [oneDayResult, sameDayResult] = await Promise.all([
+      sendReminderBatch({
+        type: "MATCH_REMINDER_1_DAY_CLIENT",
+        reminderLabel: "Tomorrow",
+        targetDate: oneDayTarget,
+      }),
+      sendReminderBatch({
+        type: "MATCH_REMINDER_SAME_DAY_CLIENT",
+        reminderLabel: "Today",
+        targetDate: now,
+      }),
+    ]);
+
+    return {
+      oneDay: oneDayResult,
+      sameDay: sameDayResult,
+    };
   });
 
-  const oneDayTarget = addDays(now, 1);
+  if (lockResult.skipped) {
+    console.log("[EMAIL_REMINDER] Skipped reminder email job", {
+      reason: lockResult.reason,
+      now: now.toISOString(),
+    });
+    return lockResult;
+  }
 
-  const [oneDayResult, sameDayResult] = await Promise.all([
-    sendReminderBatch({
-      type: "MATCH_REMINDER_1_DAY_CLIENT",
-      reminderLabel: "Tomorrow",
-      targetDate: oneDayTarget,
-    }),
-    sendReminderBatch({
-      type: "MATCH_REMINDER_SAME_DAY_CLIENT",
-      reminderLabel: "Today",
-      targetDate: now,
-    }),
-  ]);
-
-  return {
-    oneDay: oneDayResult,
-    sameDay: sameDayResult,
-  };
+  return lockResult.result;
 }
 
 function startMatchReminderEmailJob() {
