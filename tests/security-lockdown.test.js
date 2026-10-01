@@ -21,6 +21,7 @@ const Notification = require("../models/notificationModel");
 const ClientTradeAlert = require("../models/clientTradeAlertModel");
 const TravelPlanAlertMatch = require("../models/travelPlanAlertMatchModel");
 const StripeWebhookEvent = require("../models/StripeWebhookEvent");
+const UserSubscription = require("../models/UserSubscription");
 const Message = require("../models/messageModel");
 const Conversation = require("../models/conversationModel");
 const ConversationParticipant = require("../models/conversationParticipantModel");
@@ -31,6 +32,7 @@ const {
 const {
   shouldStartBackgroundJobsInApiProcess,
 } = require("../services/backgroundJobRunner");
+const { resetRateLimitBuckets } = require("../middlewares/rateLimitMiddleware");
 const { validateSocketLiveLocation } = require("../socket");
 const emailTransporter = require("../config/email");
 
@@ -333,6 +335,8 @@ test("forgot password returns generic response without leaking reset link", asyn
 });
 
 test("forgot password OTP can be verified before resetting password", async () => {
+  resetRateLimitBuckets();
+
   const { user } = await createTempUnapprovedTradesman({
     suffix: "forgot-otp",
     name: "Forgot OTP Test User",
@@ -720,6 +724,10 @@ test("background jobs are gated off by default in production API process", () =>
   }
 });
 
+test("proxy trust is disabled unless explicitly configured", () => {
+  assert.equal(app.get("trust proxy"), false);
+});
+
 test("live location endpoint rejects clients and invalid coordinates", async () => {
   const clientLogin = await loginUser("client@test.com");
   const tradesmanLogin = await loginUser("tradesman@test.com");
@@ -863,6 +871,66 @@ test("stripe webhook records processed events and ignores duplicates", async () 
 
   const storedEvent = await StripeWebhookEvent.findByPk(`evt_${uniqueSuffix}`);
   assert.ok(storedEvent.processedAt);
+  assert.equal(storedEvent.status, "processed");
+});
+
+test("stripe webhook retries failed events instead of treating them as duplicates", async () => {
+  const stripe = new Stripe("sk_test_placeholder");
+  const eventId = `evt_retry_${uniqueSuffix}`;
+  const payload = JSON.stringify({
+    id: eventId,
+    object: "event",
+    type: "invoice.paid",
+    data: {
+      object: {
+        id: `in_retry_${uniqueSuffix}`,
+        object: "invoice",
+        subscription: `sub_retry_${uniqueSuffix}`,
+      },
+    },
+  });
+  const signature = stripe.webhooks.generateTestHeaderString({
+    payload,
+    secret: process.env.STRIPE_WEBHOOK_SECRET,
+  });
+  const headers = {
+    "Content-Type": "application/json",
+    "Stripe-Signature": signature,
+  };
+  const originalUpdate = UserSubscription.update;
+
+  UserSubscription.update = async () => {
+    throw new Error("forced webhook update failure");
+  };
+
+  try {
+    const failedResponse = await request("POST", "/api/subscriptions/webhook", {
+      rawBody: payload,
+      headers,
+    });
+
+    assert.equal(failedResponse.status, 500);
+
+    const failedEvent = await StripeWebhookEvent.findByPk(eventId);
+    assert.ok(failedEvent);
+    assert.equal(failedEvent.status, "failed");
+    assert.equal(failedEvent.processedAt, null);
+  } finally {
+    UserSubscription.update = originalUpdate;
+  }
+
+  const retryResponse = await request("POST", "/api/subscriptions/webhook", {
+    rawBody: payload,
+    headers,
+  });
+
+  assert.equal(retryResponse.status, 200);
+  assert.equal(retryResponse.body.received, true);
+  assert.equal(retryResponse.body.duplicate, undefined);
+
+  const processedEvent = await StripeWebhookEvent.findByPk(eventId);
+  assert.equal(processedEvent.status, "processed");
+  assert.ok(processedEvent.processedAt);
 });
 
 test("socket live-location validation matches REST rules", () => {

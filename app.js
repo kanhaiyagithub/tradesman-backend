@@ -32,6 +32,11 @@ const matchRoutes = require('./routes/matchRoutes');
 
 const app = express();
 
+if (process.env.TRUST_PROXY === 'true') {
+  // Trust first proxy when behind a reverse proxy (nginx, ALB, etc.).
+  app.set('trust proxy', 1);
+}
+
 app.use(
   cors({
     origin(origin, callback) {

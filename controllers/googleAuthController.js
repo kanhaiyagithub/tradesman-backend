@@ -49,15 +49,23 @@ const fetchJson = (url) =>
       .on("error", reject);
   });
 
+const getAllowedGoogleClientIds = () =>
+  [
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_MOBILE_CLIENT_ID,
+    ...(process.env.GOOGLE_CLIENT_IDS || "").split(","),
+  ]
+    .map((clientId) => String(clientId || "").trim())
+    .filter(Boolean);
+
 const verifyGoogleIdToken = async (idToken) => {
   const tokenInfo = await fetchJson(
     `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`
   );
 
-  if (
-    process.env.GOOGLE_CLIENT_ID &&
-    tokenInfo.aud !== process.env.GOOGLE_CLIENT_ID
-  ) {
+  const allowedClientIds = getAllowedGoogleClientIds();
+
+  if (allowedClientIds.length && !allowedClientIds.includes(tokenInfo.aud)) {
     throw new Error("Google token audience mismatch");
   }
 

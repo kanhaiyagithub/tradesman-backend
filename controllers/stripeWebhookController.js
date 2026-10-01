@@ -120,11 +120,25 @@ exports.handleWebhook = async (req, res) => {
       defaults: {
         eventId: event.id,
         eventType: event.type,
+        status: "processing",
+        processingStartedAt: new Date(),
       },
     });
 
-    if (!created && webhookEvent.processedAt) {
-      return res.json({ received: true, duplicate: true });
+    if (!created) {
+      if (webhookEvent.status === "processed" && webhookEvent.processedAt) {
+        return res.json({ received: true, duplicate: true });
+      }
+
+      if (webhookEvent.status === "processing") {
+        return res.status(409).json({ received: true, processing: true });
+      }
+
+      await webhookEvent.update({
+        status: "processing",
+        processingStartedAt: new Date(),
+        processedAt: null,
+      });
     }
 
     switch (event.type) {
@@ -194,13 +208,19 @@ exports.handleWebhook = async (req, res) => {
     }
 
     await webhookEvent.update({
-      eventType: event.type,
+      status: "processed",
       processedAt: new Date(),
     });
 
     return res.json({ received: true });
   } catch (error) {
     console.error("Webhook processing failed:", error);
+    if (event?.id) {
+      await StripeWebhookEvent.update(
+        { status: "failed", processedAt: null },
+        { where: { eventId: event.id } }
+      );
+    }
     return res.status(500).json({ error: "Webhook processing failed" });
   }
 };

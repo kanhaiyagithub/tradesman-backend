@@ -78,6 +78,10 @@ const normalizeStorageKey = (value, options = {}) => {
     return null;
   }
 
+  if (/^https?:\/\//i.test(normalizedValue) && !normalizedValue.includes('/uploads/')) {
+    return null;
+  }
+
   const uploadsSegment = '/uploads/';
   const uploadsIndex = normalizedValue.indexOf(uploadsSegment);
   if (uploadsIndex !== -1) {
@@ -155,6 +159,10 @@ const deleteObject = async (storageKey, options = {}) => {
  * @returns {string|null} Public URL.
  */
 const getPublicUrl = (storageKey, options = {}) => {
+  if (/^https?:\/\//i.test(String(storageKey || '').trim())) {
+    return String(storageKey).trim();
+  }
+
   const normalizedKey = normalizeStorageKey(storageKey, options);
   if (!normalizedKey) {
     return null;

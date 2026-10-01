@@ -1,13 +1,8 @@
 const buckets = new Map();
 
 const getClientKey = (req, scope) => {
-  const forwardedFor = req.headers["x-forwarded-for"];
-  const ip = Array.isArray(forwardedFor)
-    ? forwardedFor[0]
-    : String(forwardedFor || req.ip || req.socket?.remoteAddress || "unknown")
-        .split(",")[0]
-        .trim();
-
+  // req.ip already respects trust proxy when configured
+  const ip = req.ip || req.socket?.remoteAddress || "unknown";
   return `${scope}:${ip}`;
 };
 
@@ -38,6 +33,10 @@ const createRateLimiter = ({ windowMs, max, scope }) => (req, res, next) => {
   return next();
 };
 
+const resetRateLimitBuckets = () => {
+  buckets.clear();
+};
+
 const authRateLimiter = createRateLimiter({
   scope: "auth",
   windowMs: 15 * 60 * 1000,
@@ -53,4 +52,5 @@ const passwordResetRateLimiter = createRateLimiter({
 module.exports = {
   authRateLimiter,
   passwordResetRateLimiter,
+  resetRateLimitBuckets,
 };

@@ -88,6 +88,28 @@ const getManageableSubscriptionForUser = async (userId) => {
   });
 };
 
+const syncLocalSubscriptionAfterCancel = async (
+  localSubscription,
+  stripeSubscription
+) => {
+  localSubscription.status = stripeSubscription.status;
+  localSubscription.currentPeriodStart = fromUnix(
+    stripeSubscription.current_period_start
+  );
+  localSubscription.currentPeriodEnd = fromUnix(
+    stripeSubscription.current_period_end
+  );
+  localSubscription.cancelAtPeriodEnd =
+    !!stripeSubscription.cancel_at_period_end;
+  localSubscription.trialEndsAt = fromUnix(stripeSubscription.trial_end);
+
+  if (stripeSubscription.status === "canceled") {
+    localSubscription.endDate = new Date();
+  }
+
+  await localSubscription.save();
+};
+
 const getStripeSubscriptionWithItem = async (stripeSubscriptionId) => {
   const stripeSubscription = await stripe.subscriptions.retrieve(
     stripeSubscriptionId,
@@ -449,6 +471,89 @@ exports.upgradePlan = async (req, res) => {
  */
 exports.downgradePlan = async (req, res) => {
   return changePlan(req, res, "downgrade");
+};
+
+/**
+ * POST /api/subscriptions/cancel-subscription
+ */
+exports.cancelSubscription = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const role = req.user?.role;
+    const cancelImmediately = req.body?.cancelImmediately === true;
+
+    if (!userId) return sendResponse(res, 401, false, "Unauthorized");
+    if (role !== "tradesman") {
+      return sendResponse(
+        res,
+        403,
+        false,
+        "Only tradesmen can cancel subscriptions"
+      );
+    }
+
+    const localSubscription = await getManageableSubscriptionForUser(userId);
+
+    if (!localSubscription) {
+      return sendResponse(
+        res,
+        404,
+        false,
+        "No active or trialing subscription found"
+      );
+    }
+
+    if (!localSubscription.stripeSubscriptionId) {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "Stripe subscription is missing for this user"
+      );
+    }
+
+    if (localSubscription.cancelAtPeriodEnd && !cancelImmediately) {
+      return sendResponse(
+        res,
+        200,
+        true,
+        "Subscription is already scheduled to end",
+        localSubscription
+      );
+    }
+
+    const stripeSubscription = cancelImmediately
+      ? await stripe.subscriptions.cancel(localSubscription.stripeSubscriptionId)
+      : await stripe.subscriptions.update(localSubscription.stripeSubscriptionId, {
+          cancel_at_period_end: true,
+          metadata: {
+            userId: String(userId),
+            planId: String(localSubscription.planId),
+          },
+        });
+
+    await syncLocalSubscriptionAfterCancel(localSubscription, stripeSubscription);
+
+    return sendResponse(
+      res,
+      200,
+      true,
+      cancelImmediately
+        ? "Subscription canceled successfully"
+        : "Subscription will end at the current period end",
+      {
+        subscriptionId: stripeSubscription.id,
+        status: localSubscription.status,
+        cancelAtPeriodEnd: localSubscription.cancelAtPeriodEnd,
+        currentPeriodEnd: localSubscription.currentPeriodEnd,
+        endDate: localSubscription.endDate,
+        note: "Webhook will continue syncing the final subscription state into the database.",
+      }
+    );
+  } catch (err) {
+    console.error("cancelSubscription error:", err);
+    return sendResponse(res, 500, false, err.message || "Server error");
+  }
 };
 
 /**

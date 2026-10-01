@@ -17,6 +17,15 @@ const StripeWebhookEvent = sequelize.define(
       type: DataTypes.DATE,
       allowNull: true,
     },
+    processingStartedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+    status: {
+      type: DataTypes.ENUM("processing", "processed", "failed"),
+      allowNull: false,
+      defaultValue: "processing",
+    },
   },
   {
     tableName: "stripe_webhook_events",

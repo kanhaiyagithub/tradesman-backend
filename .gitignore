@@ -8,4 +8,4 @@ node_modules/
 package-lock.json                                       
 uploads/
 
-config/firebase-service-account.json
+config/firebase-service-account*.json

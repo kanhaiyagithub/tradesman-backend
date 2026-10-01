@@ -25,6 +25,11 @@ router.post(
   verifyToken,
   subscriptionController.downgradePlan
 );
+router.post(
+  "/cancel-subscription",
+  verifyToken,
+  subscriptionController.cancelSubscription
+);
 
 router.post(
   "/mobile/setup-intent",

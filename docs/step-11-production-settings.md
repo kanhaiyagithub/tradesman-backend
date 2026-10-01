@@ -93,6 +93,8 @@ DB_PASS=your-db-password
 GOOGLE_CLIENT_ID=your-google-client-id
 GOOGLE_CLIENT_SECRET=your-google-client-secret
 GOOGLE_CALLBACK_URL=https://api.example.com/api/auth/google/callback
+GOOGLE_MOBILE_CLIENT_ID=your-mobile-google-client-id
+GOOGLE_CLIENT_IDS=optional-extra-client-id-1,optional-extra-client-id-2
 
 STRIPE_SECRET_KEY=sk_live_xxx
 STRIPE_PUBLISHABLE_KEY=pk_live_xxx

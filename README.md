@@ -110,6 +110,8 @@ JWT_EXPIRE=7d
 # Google OAuth
 GOOGLE_CLIENT_ID=your-google-client-id
 GOOGLE_CLIENT_SECRET=your-google-client-secret
+GOOGLE_MOBILE_CLIENT_ID=your-mobile-google-client-id
+GOOGLE_CLIENT_IDS=optional-extra-client-id-1,optional-extra-client-id-2
 
 # Stripe
 STRIPE_SECRET_KEY=sk_test_xxx
@@ -363,6 +365,7 @@ Mounted at `/api/subscriptions`.
 | `POST` | `/checkout-session` | User | Create Stripe checkout session. |
 | `POST` | `/upgrade-plan` | User | Upgrade current plan. |
 | `POST` | `/downgrade-plan` | User | Downgrade current plan. |
+| `POST` | `/cancel-subscription` | User | End the current subscription. Defaults to ending at the current period end; send `{ "cancelImmediately": true }` to cancel immediately. |
 | `POST` | `/mobile/setup-intent` | User | Create mobile setup intent. |
 | `POST` | `/mobile/create-subscription` | User | Create mobile subscription. |
 

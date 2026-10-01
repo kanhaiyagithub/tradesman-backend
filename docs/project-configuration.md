@@ -674,6 +674,7 @@ Runtime files and code:
 | Subscription controller | `controllers/subscriptionController.js` |
 | Webhook controller | `controllers/stripeWebhookController.js` |
 | Webhook route | `POST /api/subscriptions/webhook` |
+| Cancellation route | `POST /api/subscriptions/cancel-subscription` |
 | Plans table | `subscription_plans` |
 | User subscription table | `user_subscriptions` |
 | Plan config | `config/subscriptionPlans.js` |
@@ -741,6 +742,14 @@ Upgrade/downgrade flow:
 4. Downgrades also check the current open travel plan stop count against the target plan limit.
 5. Backend updates the Stripe subscription item price.
 6. Webhook syncs final subscription state into `user_subscriptions`.
+
+Cancellation flow:
+
+1. Authenticated tradesman calls `POST /api/subscriptions/cancel-subscription`.
+2. Backend requires an active or trialing subscription with a Stripe subscription id.
+3. By default, backend sets Stripe `cancel_at_period_end` so access lasts until the current period ends.
+4. If the body includes `{ "cancelImmediately": true }`, backend cancels the Stripe subscription immediately.
+5. Backend updates local cancellation, period, status, and end-date fields. Webhooks continue syncing the final Stripe state.
 
 ## Required Production Environment Variables
 

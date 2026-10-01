@@ -14,19 +14,70 @@ passport.use(
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        // Check if user already exists
-        let user = await User.findOne({ where: { googleId: profile.id } });
+        const emailEntry = profile.emails?.[0];
+        const googleId = profile.id;
+
+        if (!emailEntry?.value) {
+          return done(new Error("Google profile missing email"), null);
+        }
+
+        const emailVerified =
+          emailEntry.verified === true || profile._json?.email_verified === true;
+
+        // Verify Google confirmed email ownership.
+        if (!emailVerified) {
+          return done(new Error("Google email is not verified"), null);
+        }
+
+        const email = String(emailEntry.value).toLowerCase();
+
+        // Try to find by googleId first (existing Google user)
+        let user = await User.findOne({ where: { googleId } });
 
         if (!user) {
-          user = await User.create({
-            googleId: profile.id,
-            name: profile.displayName,
-            email: profile.emails?.[0]?.value,
-            profileImage: profile.photos?.[0]?.value,
-            provider: "google", 
-            isVerified: true   // ✅ change this
-  
-          });
+          // Check if email exists - only link if already verified or Google-based
+          const existingUser = await User.findOne({ where: { email } });
+
+          if (existingUser) {
+            // Only auto-link if account was verified or previously used Google
+            if (existingUser.isVerified || existingUser.provider === "google") {
+              user = existingUser;
+              await user.update({
+                googleId,
+                provider: "google",
+                isVerified: true,
+                profileImage: user.profileImage || profile.photos?.[0]?.value,
+              });
+            } else {
+              // Reject linking to unverified password-only accounts
+              return done(
+                new Error("Email exists but is not verified. Please verify your email first."),
+                null
+              );
+            }
+          } else {
+            // New user - create via Google
+            user = await User.create({
+              googleId,
+              name: profile.displayName,
+              email,
+              profileImage: profile.photos?.[0]?.value,
+              provider: "google",
+              isVerified: true,
+            });
+          }
+        } else {
+          // Update existing Google user's profile if needed
+          const updates = {};
+          if (!user.profileImage && profile.photos?.[0]?.value) {
+            updates.profileImage = profile.photos[0].value;
+          }
+          if (!user.isVerified) {
+            updates.isVerified = true;
+          }
+          if (Object.keys(updates).length) {
+            await user.update(updates);
+          }
         }
 
         return done(null, user);
