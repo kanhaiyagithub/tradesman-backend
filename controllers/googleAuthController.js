@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const User = require("../models/User");
 const https = require("https");
+const metaConversionService = require("../services/metaConversionService");
 
 const fetchJson = (url) =>
   new Promise((resolve, reject) => {
@@ -150,6 +151,15 @@ exports.googleMobileLogin = async (req, res) => {
         provider: "google",
         isVerified: true
       });
+
+      // Meta Conversions API: never throws and never blocks login.
+      await metaConversionService.trackRegistration({
+        user,
+        method: "google",
+        metaAttribution: req.body.metaAttribution,
+        ip: req.ip,
+        userAgent: req.get("User-Agent"),
+      });
     } else {
       const changedFields = {};
 
@@ -163,6 +173,14 @@ exports.googleMobileLogin = async (req, res) => {
       if (Object.keys(changedFields).length) {
         await user.update(changedFields);
       }
+
+      // Existing user: just refresh device / attribution info.
+      await metaConversionService.trackAttributionOnly({
+        userId: user.id,
+        metaAttribution: req.body.metaAttribution,
+        ip: req.ip,
+        userAgent: req.get("User-Agent"),
+      });
     }
 
     const jwtToken = jwt.sign(

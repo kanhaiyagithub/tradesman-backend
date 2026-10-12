@@ -6,6 +6,7 @@ const Review = require("../models/reviewModel");
 const TravelPlan = require("../models/locationModel");
 const TradesType = require("../models/tradesTypeModel");
 const storageService = require("../services/storage/storageService");
+const metaConversionService = require("../services/metaConversionService");
 const { ACTIVE_TRAVEL_PLAN_STATUSES } = require("../services/travelPlanStatusService");
 
 const DEFAULT_FILTER_RADIUS_KM = 15;
@@ -528,6 +529,15 @@ exports.register = async (req, res) => {
       //   });
       // }
     }
+
+    // Meta Conversions API: never throws and never blocks signup.
+    await metaConversionService.trackRegistration({
+      user,
+      method: "email",
+      metaAttribution: req.body.metaAttribution,
+      ip: req.ip,
+      userAgent: req.get("User-Agent"),
+    });
 
     return sendResponse(
       res,

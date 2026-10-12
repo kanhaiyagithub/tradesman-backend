@@ -17,7 +17,9 @@
     "chat:migrate:conversation-id": "node scripts/migrateMessageConversationIds.js",
     "subscriptions:seed": "node scripts/createStripePlan.js",
     "email:reminders": "node scripts/runMatchReminderEmails.js",
-    "email:test": "node scripts/sendTestEmail.js"
+    "email:test": "node scripts/sendTestEmail.js",
+    "meta:test": "node scripts/sendMetaTestEvent.js",
+    "meta:retry": "node scripts/retryMetaEvents.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

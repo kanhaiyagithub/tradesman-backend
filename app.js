@@ -29,6 +29,7 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const clientTradeAlertRoutes = require('./routes/clientTradeAlertRoutes');
 const liveLocationRoutes = require('./routes/liveLocationRoutes');
 const matchRoutes = require('./routes/matchRoutes');
+const metaRoutes = require('./routes/metaRoutes');
 
 const app = express();
 
@@ -105,6 +106,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/client-trade-alerts', clientTradeAlertRoutes);
 app.use('/api/location', liveLocationRoutes);
 app.use('/api/matches', matchRoutes);
+app.use('/api/meta', metaRoutes);
 
 /**
  * Simple app health route.

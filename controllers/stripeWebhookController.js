@@ -6,6 +6,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const UserSubscription = require("../models/UserSubscription");
 const SubscriptionPlan = require("../models/SubscriptionPlan");
 const StripeWebhookEvent = require("../models/StripeWebhookEvent");
+const metaConversionService = require("../services/metaConversionService");
 
 const fromUnix = (value) => (value ? new Date(value * 1000) : null);
 
@@ -192,6 +193,9 @@ exports.handleWebhook = async (req, res) => {
             { where: { stripeSubscriptionId: data.subscription } }
           );
         }
+
+        // Meta Conversions API: never throws; only the first paid invoice counts.
+        await metaConversionService.trackSubscribeFromInvoice(data);
         break;
 
       case "invoice.payment_failed":
