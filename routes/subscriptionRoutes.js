@@ -11,6 +11,11 @@ router.get("/cancel", subscriptionController.cancelPage);
 // Protected
 router.get("/my", verifyToken, subscriptionController.getMySubscription);
 router.post(
+  "/billing-portal",
+  verifyToken,
+  subscriptionController.createBillingPortalSession
+);
+router.post(
   "/checkout-session",
   verifyToken,
   subscriptionController.createCheckoutSession

@@ -7,8 +7,32 @@ const UserSubscription = require("../models/UserSubscription");
 const SubscriptionPlan = require("../models/SubscriptionPlan");
 const StripeWebhookEvent = require("../models/StripeWebhookEvent");
 const metaConversionService = require("../services/metaConversionService");
+const { createAndSendNotification } = require("../services/notificationService");
 
 const fromUnix = (value) => (value ? new Date(value * 1000) : null);
+
+// Stripe statuses the local ENUM cannot store map to their closest access state.
+const normalizeStripeStatus = (status) => {
+  if (status === "incomplete_expired") return "canceled";
+  if (status === "paused") return "unpaid";
+  return status;
+};
+
+// Newer Stripe API versions moved the billing period from the subscription to
+// its items, so read either shape.
+const getPeriodUnix = (stripeSubscription, field) =>
+  stripeSubscription[field] ?? stripeSubscription.items?.data?.[0]?.[field] ?? null;
+
+const getInvoiceSubscriptionId = (invoice) => {
+  const subscription =
+    invoice.subscription ||
+    invoice.parent?.subscription_details?.subscription ||
+    null;
+
+  return subscription && typeof subscription === "object"
+    ? subscription.id
+    : subscription;
+};
 
 const findLocalSubscription = async ({
   stripeSubscriptionId = null,
@@ -27,6 +51,43 @@ const findLocalSubscription = async ({
     where: { [Op.or]: conditions },
     order: [["createdAt", "DESC"]],
   });
+};
+
+/**
+ * Tells the user their card failed and points the app at the billing portal.
+ * Never throws: a notification problem must not fail the webhook.
+ */
+const notifyPaymentFailed = async (invoice, stripeSubscriptionId) => {
+  try {
+    // A failed FIRST payment is shown by the app during checkout itself.
+    if (invoice.billing_reason === "subscription_create") return;
+
+    const localSubscription = await findLocalSubscription({
+      stripeSubscriptionId,
+      stripeCustomerId:
+        invoice.customer && typeof invoice.customer === "object"
+          ? invoice.customer.id
+          : invoice.customer,
+    });
+
+    if (!localSubscription) return;
+
+    await createAndSendNotification(
+      localSubscription.userId,
+      "Payment failed",
+      "We couldn't process your latest subscription payment. Update your card to keep your access.",
+      {
+        type: "payment_failed",
+        // The app should call POST /api/subscriptions/billing-portal for a fresh link.
+        action: "open_billing_portal",
+        stripeSubscriptionId: stripeSubscriptionId || "",
+        attemptCount: invoice.attempt_count || "",
+        nextPaymentAttempt: invoice.next_payment_attempt || "",
+      }
+    );
+  } catch (error) {
+    console.error("Payment failed notification error:", error.message);
+  }
 };
 
 const syncSubscriptionFromStripe = async (stripeSubscription) => {
@@ -74,13 +135,14 @@ const syncSubscriptionFromStripe = async (stripeSubscription) => {
     stripeSubscription.customer || localSubscription.stripeCustomerId;
 
   localSubscription.stripeSubscriptionId = stripeSubscription.id;
-  localSubscription.status = stripeSubscription.status;
+  localSubscription.status = normalizeStripeStatus(stripeSubscription.status);
   localSubscription.currentPeriodStart = fromUnix(
-    stripeSubscription.current_period_start
+    getPeriodUnix(stripeSubscription, "current_period_start")
   );
   localSubscription.currentPeriodEnd = fromUnix(
-    stripeSubscription.current_period_end
+    getPeriodUnix(stripeSubscription, "current_period_end")
   );
+  localSubscription.lastSyncedAt = new Date();
   localSubscription.cancelAtPeriodEnd =
     !!stripeSubscription.cancel_at_period_end;
   localSubscription.trialEndsAt = fromUnix(stripeSubscription.trial_end);
@@ -198,14 +260,26 @@ exports.handleWebhook = async (req, res) => {
         await metaConversionService.trackSubscribeFromInvoice(data);
         break;
 
-      case "invoice.payment_failed":
-        if (data.subscription) {
+      case "invoice.payment_failed": {
+        const failedSubscriptionId = getInvoiceSubscriptionId(data);
+
+        if (failedSubscriptionId) {
+          // past_due keeps access while Stripe retries the card, so only move
+          // subscriptions that already had access (never a failed first payment).
           await UserSubscription.update(
             { status: "past_due" },
-            { where: { stripeSubscriptionId: data.subscription } }
+            {
+              where: {
+                stripeSubscriptionId: failedSubscriptionId,
+                status: { [Op.in]: ["active", "trialing"] },
+              },
+            }
           );
         }
+
+        await notifyPaymentFailed(data, failedSubscriptionId);
         break;
+      }
 
       default:
         console.log("Unhandled webhook event:", event.type);
@@ -230,6 +304,8 @@ exports.handleWebhook = async (req, res) => {
 };
 
 module.exports._private = {
+  notifyPaymentFailed,
+  getInvoiceSubscriptionId,
   findLocalSubscription,
   syncSubscriptionFromStripe,
 };

@@ -13,6 +13,9 @@ const storageService = require("../services/storage/storageService");
 
 const { matchTravelPlanWithAlerts } = require("../services/travelAlertService");
 const {
+  buildAccessibleSubscriptionWhere,
+} = require("../services/subscriptionAccessService");
+const {
   TRAVEL_PLAN_STATUSES,
   buildActiveOrUpcomingPlanWhere,
   getStatusForTravelWindow,
@@ -28,13 +31,8 @@ const sendResponse = (res, statusCode, success, message, data = null) =>
 
 async function getAccessiblePlanForUser(userId) {
   return await UserSubscription.findOne({
-    where: {
-      userId,
-
-      status: {
-        [Op.in]: ["active", "trialing"],
-      },
-    },
+    // active/trialing/past_due (grace while Stripe retries) with a current period.
+    where: buildAccessibleSubscriptionWhere(userId),
 
     include: [{ model: SubscriptionPlan, as: "plan" }],
 

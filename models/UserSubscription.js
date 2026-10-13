@@ -84,6 +84,12 @@ const UserSubscription = sequelize.define(
       defaultValue: false,
     },
 
+    // Last time this row was confirmed against Stripe (webhook or daily re-sync).
+    lastSyncedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+
     startDate: {
       type: DataTypes.DATE,
       allowNull: false,

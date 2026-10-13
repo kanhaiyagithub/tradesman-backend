@@ -402,6 +402,8 @@ async function createMatchAndNotify({ alert, travelPlan, bestMatch }) {
     matchedDistanceKm: Number(bestMatch.distance.toFixed(2)),
     estimatedArrivalDate: bestMatch.point.expectedDateTime,
     notificationSent: false,
+    notificationAttempts: 1,
+    lastNotificationAttemptAt: new Date(),
     status: "pending",
   });
 
@@ -431,7 +433,14 @@ async function createMatchAndNotify({ alert, travelPlan, bestMatch }) {
     },
   );
 
-  if (pushResult.success) {
+  // The in-app notification is stored first and stays as the fallback. The
+  // match is only "notified" once a push actually reached a device; otherwise
+  // it stays pending and matchNotificationRetryService retries the push.
+  if (pushResult.notificationId) {
+    await match.update({ notificationId: pushResult.notificationId });
+  }
+
+  if (pushResult.success && pushResult.pushSuccess) {
     await match.update({
       notificationSent: true,
       notificationSentAt: new Date(),
@@ -445,10 +454,14 @@ async function createMatchAndNotify({ alert, travelPlan, bestMatch }) {
       failureCount: pushResult.failureCount,
     });
   } else {
-    console.log("[TRAVEL_ALERT] Push not sent, match kept pending", {
+    await match.update({
+      notificationError: String(pushResult.pushReason || pushResult.reason || "PUSH_FAILED").slice(0, 255),
+    });
+
+    console.log("[TRAVEL_ALERT] Push not sent, match kept pending for retry", {
       matchId: match.id,
       clientId: alert.clientId,
-      reason: pushResult.reason,
+      reason: pushResult.pushReason || pushResult.reason,
     });
   }
 

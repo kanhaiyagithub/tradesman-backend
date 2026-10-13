@@ -18,6 +18,8 @@
     "subscriptions:seed": "node scripts/createStripePlan.js",
     "email:reminders": "node scripts/runMatchReminderEmails.js",
     "email:test": "node scripts/sendTestEmail.js",
+    "subscriptions:resync": "node scripts/runSubscriptionResync.js",
+    "matches:retry-notifications": "node scripts/runMatchNotificationRetry.js",
     "meta:test": "node scripts/sendMetaTestEvent.js",
     "meta:retry": "node scripts/retryMetaEvents.js"
   },

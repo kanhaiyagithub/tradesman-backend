@@ -1,6 +1,8 @@
 const { refreshTravelPlanStatuses } = require("./travelPlanStatusService");
 const { startNotificationCleanupJob } = require("./notificationCleanupService");
 const { startMatchReminderEmailJob } = require("./emailReminderService");
+const { startSubscriptionResyncJob } = require("./subscriptionResyncService");
+const { startMatchNotificationRetryJob } = require("./matchNotificationRetryService");
 
 const DEFAULT_STATUS_REFRESH_INTERVAL_MS = 60 * 1000;
 
@@ -37,6 +39,8 @@ function startBackgroundJobs() {
   refreshTravelPlanStatusesSafely();
   workers.push(startNotificationCleanupJob());
   workers.push(startMatchReminderEmailJob());
+  workers.push(startSubscriptionResyncJob());
+  workers.push(startMatchNotificationRetryJob());
 
   const statusRefreshTimer = setInterval(
     refreshTravelPlanStatusesSafely,

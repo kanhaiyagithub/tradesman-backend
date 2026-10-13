@@ -190,6 +190,40 @@ exports.getMySubscription = async (req, res) => {
 };
 
 /**
+ * POST /api/subscriptions/billing-portal
+ *
+ * Returns a short-lived Stripe customer billing portal link so the user can
+ * update their card. Create a fresh link per tap; do not store or push it.
+ */
+exports.createBillingPortalSession = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return sendResponse(res, 401, false, "Unauthorized");
+
+    const latestSubscription = await UserSubscription.findOne({
+      where: { userId, stripeCustomerId: { [Op.ne]: null } },
+      order: [["createdAt", "DESC"]],
+    });
+
+    if (!latestSubscription?.stripeCustomerId) {
+      return sendResponse(res, 404, false, "No billing account found");
+    }
+
+    const session = await stripe.billingPortal.sessions.create({
+      customer: latestSubscription.stripeCustomerId,
+      return_url: process.env.BILLING_PORTAL_RETURN_URL || APP_BASE_URL,
+    });
+
+    return sendResponse(res, 200, true, "Billing portal session created", {
+      url: session.url,
+    });
+  } catch (err) {
+    console.error("createBillingPortalSession error:", err);
+    return sendResponse(res, 500, false, "Server error");
+  }
+};
+
+/**
  * POST /api/subscriptions/checkout-session
  */
 exports.createCheckoutSession = async (req, res) => {
