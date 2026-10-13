@@ -7,6 +7,10 @@ const SubscriptionPlan = require("../models/SubscriptionPlan");
 const { SUBSCRIPTION_PLAN_NAMES } = require("../config/subscriptionPlans");
 const UserSubscription = require("../models/UserSubscription");
 const User = require("../models/User");
+const {
+  sendSubscriptionCancelScheduledEmail,
+  sendSubscriptionEndedEmail,
+} = require("../services/emailService");
 const TravelPlan = require("../models/locationModel");
 const {
   buildActiveOrUpcomingPlanWhere,
@@ -567,6 +571,32 @@ exports.cancelSubscription = async (req, res) => {
         });
 
     await syncLocalSubscriptionAfterCancel(localSubscription, stripeSubscription);
+
+    // The local row is already updated here, so the webhook will not see a change
+    // and would not email. Send the matching email now. The helpers never throw
+    // and use a once-only key; the try/catch keeps the response unaffected anyway.
+    try {
+      const emailUser = await User.findByPk(userId);
+
+      if (stripeSubscription.status === "canceled") {
+        await sendSubscriptionEndedEmail({
+          user: emailUser,
+          stripeSubscriptionId: stripeSubscription.id,
+        });
+      } else if (stripeSubscription.cancel_at_period_end === true) {
+        await sendSubscriptionCancelScheduledEmail({
+          user: emailUser,
+          stripeSubscriptionId: stripeSubscription.id,
+          endDate:
+            fromUnix(
+              stripeSubscription.current_period_end ??
+                stripeSubscription.items?.data?.[0]?.current_period_end
+            ) || localSubscription.currentPeriodEnd,
+        });
+      }
+    } catch (emailError) {
+      console.error("cancelSubscription email error:", emailError.message);
+    }
 
     return sendResponse(
       res,

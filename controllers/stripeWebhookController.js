@@ -8,6 +8,14 @@ const SubscriptionPlan = require("../models/SubscriptionPlan");
 const StripeWebhookEvent = require("../models/StripeWebhookEvent");
 const metaConversionService = require("../services/metaConversionService");
 const { createAndSendNotification } = require("../services/notificationService");
+const User = require("../models/User");
+const { toMajorUnits } = require("../utils/metaCapi");
+const {
+  sendSubscriptionWelcomeEmail,
+  sendSubscriptionPaymentFailedEmail,
+  sendSubscriptionCancelScheduledEmail,
+  sendSubscriptionEndedEmail,
+} = require("../services/emailService");
 
 const fromUnix = (value) => (value ? new Date(value * 1000) : null);
 
@@ -87,6 +95,157 @@ const notifyPaymentFailed = async (invoice, stripeSubscriptionId) => {
     );
   } catch (error) {
     console.error("Payment failed notification error:", error.message);
+  }
+};
+
+/* ===========================
+   CUSTOMER EMAILS
+   Every function below catches its own errors: an email problem must never
+   fail (or cause a retry of) the webhook. Once-only sending is enforced by the
+   email log key inside emailService.sendSubscriptionEmail, so a re-delivered
+   or retried event cannot send a second copy.
+   =========================== */
+
+const customerIdOf = (invoice) =>
+  invoice.customer && typeof invoice.customer === "object"
+    ? invoice.customer.id
+    : invoice.customer;
+
+const getInvoiceMetadataUserId = (invoice) => {
+  const candidates = [
+    invoice.subscription_details?.metadata,
+    invoice.parent?.subscription_details?.metadata,
+    invoice.metadata,
+    invoice.lines?.data?.[0]?.metadata,
+  ];
+
+  for (const metadata of candidates) {
+    const userId = Number(metadata?.userId);
+    if (userId) return userId;
+  }
+
+  return null;
+};
+
+const findInvoiceLocalSubscription = (invoice, stripeSubscriptionId) =>
+  findLocalSubscription({
+    stripeSubscriptionId,
+    stripeCustomerId: customerIdOf(invoice),
+  });
+
+/** Welcome email: only for the FIRST paid invoice of a subscription. */
+const emailWelcomeForInvoice = async (invoice, stripeSubscriptionId) => {
+  try {
+    if (
+      invoice.billing_reason !== "subscription_create" ||
+      !(Number(invoice.amount_paid) > 0) ||
+      !stripeSubscriptionId
+    ) {
+      return;
+    }
+
+    const localSubscription = await findInvoiceLocalSubscription(invoice, stripeSubscriptionId);
+    const userId = localSubscription?.userId || getInvoiceMetadataUserId(invoice);
+    if (!userId) return;
+
+    const user = await User.findByPk(userId);
+    const plan = localSubscription?.planId
+      ? await SubscriptionPlan.findByPk(localSubscription.planId)
+      : null;
+    const lineItem = invoice.lines?.data?.[0];
+
+    await sendSubscriptionWelcomeEmail({
+      user,
+      stripeSubscriptionId,
+      planName: plan?.name || lineItem?.description || "Touring Trades",
+      amount: toMajorUnits(invoice.amount_paid, invoice.currency),
+      currency: invoice.currency,
+      renewalDate: localSubscription?.currentPeriodEnd || fromUnix(lineItem?.period?.end),
+    });
+  } catch (error) {
+    console.error("Welcome email error:", error.message);
+  }
+};
+
+/** Payment-failed email: not for the first payment (the app shows that at checkout). */
+const emailPaymentFailedForInvoice = async (invoice, stripeSubscriptionId) => {
+  try {
+    if (invoice.billing_reason === "subscription_create") return;
+
+    const localSubscription = await findInvoiceLocalSubscription(invoice, stripeSubscriptionId);
+    if (!localSubscription) return;
+
+    const user = await User.findByPk(localSubscription.userId);
+
+    await sendSubscriptionPaymentFailedEmail({
+      user,
+      stripeSubscriptionId,
+      invoiceId: invoice.id,
+      attemptCount: invoice.attempt_count,
+      nextAttemptDate: fromUnix(invoice.next_payment_attempt),
+    });
+  } catch (error) {
+    console.error("Payment failed email error:", error.message);
+  }
+};
+
+/** Reads the local row BEFORE it is synced, so changes can be detected. */
+const snapshotLocalSubscription = async (stripeSubscription) => {
+  try {
+    const row = await findLocalSubscription({
+      stripeSubscriptionId: stripeSubscription.id,
+      stripeCustomerId: stripeSubscription.customer,
+    });
+
+    return row
+      ? {
+          userId: row.userId,
+          status: row.status,
+          cancelAtPeriodEnd: Boolean(row.cancelAtPeriodEnd),
+          currentPeriodEnd: row.currentPeriodEnd,
+        }
+      : null;
+  } catch (error) {
+    console.error("Subscription snapshot error:", error.message);
+    return null;
+  }
+};
+
+const ACCESS_STATUSES_BEFORE_END = ["active", "trialing", "past_due", "unpaid"];
+
+/**
+ * Cancellation-scheduled (cancel_at_period_end false -> true) and
+ * subscription-ended (-> canceled) emails. `previous` is the local row as it
+ * was before syncing this Stripe event.
+ */
+const emailSubscriptionChange = async (previous, stripeSubscription) => {
+  try {
+    if (!previous) return;
+
+    const user = await User.findByPk(previous.userId);
+
+    if (stripeSubscription.status === "canceled") {
+      if (ACCESS_STATUSES_BEFORE_END.includes(previous.status)) {
+        await sendSubscriptionEndedEmail({
+          user,
+          stripeSubscriptionId: stripeSubscription.id,
+        });
+      }
+      return;
+    }
+
+    if (!previous.cancelAtPeriodEnd && stripeSubscription.cancel_at_period_end === true) {
+      await sendSubscriptionCancelScheduledEmail({
+        user,
+        stripeSubscriptionId: stripeSubscription.id,
+        endDate:
+          fromUnix(getPeriodUnix(stripeSubscription, "current_period_end")) ||
+          fromUnix(stripeSubscription.cancel_at) ||
+          previous.currentPeriodEnd,
+      });
+    }
+  } catch (error) {
+    console.error("Subscription change email error:", error.message);
   }
 };
 
@@ -237,28 +396,47 @@ exports.handleWebhook = async (req, res) => {
       }
 
       case "customer.subscription.created":
-      case "customer.subscription.updated":
         await syncSubscriptionFromStripe(data);
         break;
 
-      case "customer.subscription.deleted":
+      case "customer.subscription.updated": {
+        // Compare with the local row BEFORE syncing it. Sent before the sync so
+        // a webhook retry after a failed sync cannot miss the email; the email
+        // log key stops a retry from sending a second one.
+        const previous = await snapshotLocalSubscription(data);
+        await emailSubscriptionChange(previous, data);
+        await syncSubscriptionFromStripe(data);
+        break;
+      }
+
+      case "customer.subscription.deleted": {
+        const previous = await snapshotLocalSubscription(data);
+        await emailSubscriptionChange(previous, { ...data, status: "canceled" });
         await syncSubscriptionFromStripe({
           ...data,
           status: "canceled",
         });
         break;
+      }
 
-      case "invoice.paid":
-        if (data.subscription) {
+      case "invoice.paid": {
+        // Newer Stripe API versions moved the id to invoice.parent.subscription_details.
+        const paidSubscriptionId = getInvoiceSubscriptionId(data);
+
+        if (paidSubscriptionId) {
           await UserSubscription.update(
             { status: "active" },
-            { where: { stripeSubscriptionId: data.subscription } }
+            { where: { stripeSubscriptionId: paidSubscriptionId } }
           );
         }
 
         // Meta Conversions API: never throws; only the first paid invoice counts.
         await metaConversionService.trackSubscribeFromInvoice(data);
+
+        // Thank-you email for the first paid invoice only (never renewals or $0 invoices).
+        await emailWelcomeForInvoice(data, paidSubscriptionId);
         break;
+      }
 
       case "invoice.payment_failed": {
         const failedSubscriptionId = getInvoiceSubscriptionId(data);
@@ -278,6 +456,7 @@ exports.handleWebhook = async (req, res) => {
         }
 
         await notifyPaymentFailed(data, failedSubscriptionId);
+        await emailPaymentFailedForInvoice(data, failedSubscriptionId);
         break;
       }
 
