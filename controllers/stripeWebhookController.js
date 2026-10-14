@@ -278,6 +278,20 @@ const syncSubscriptionFromStripe = async (stripeSubscription) => {
       return;
     }
 
+    // The Stripe customer points at a user id that does not exist in THIS database
+    // (for example an event from another environment sharing the Stripe account).
+    // Creating the row would fail the foreign key and make Stripe retry forever,
+    // so skip it and acknowledge the event.
+    const owner = await User.findByPk(userId);
+    if (!owner) {
+      console.warn("Skipping Stripe subscription: mapped user does not exist in this database", {
+        stripeSubscriptionId: stripeSubscription.id,
+        stripeCustomerId: stripeSubscription.customer,
+        userId,
+      });
+      return;
+    }
+
     localSubscription = await UserSubscription.create({
       userId,
       planId,

@@ -12,7 +12,15 @@ process.env.STRIPE_SECRET_KEY = "sk_test_fake_not_real";
 process.env.STRIPE_WEBHOOK_SECRET = "whsec_fake_test_secret";
 process.env.META_CAPI_ENABLED = "false";
 
-const Stripe = require("stripe");
+// Replace the Stripe client so the customer lookup in the sync never hits the network.
+const RealStripe = require("stripe");
+function FakeStripe(key) {
+  const client = new RealStripe(key);
+  client.customers.retrieve = async (id) => ({ id, metadata: {} });
+  return client;
+}
+require.cache[require.resolve("stripe")].exports = FakeStripe;
+const Stripe = FakeStripe;
 const UserSubscription = require("../models/UserSubscription");
 const StripeWebhookEvent = require("../models/StripeWebhookEvent");
 const webhook = require("../controllers/stripeWebhookController");
@@ -134,4 +142,50 @@ test("invoice.paid with no subscription id updates nothing and does not throw", 
   assert.equal(updateCalls, 0);
   assert.equal(statusOf("sub_123"), "past_due");
   assert.equal(statusOf("sub_other"), "past_due");
+});
+
+test("a subscription whose mapped user does not exist is skipped, not a webhook failure", async () => {
+  const SubscriptionPlan = require("../models/SubscriptionPlan");
+  const User = require("../models/User");
+  const originals = {
+    subFindOne: UserSubscription.findOne,
+    subCreate: UserSubscription.create,
+    planFindOne: SubscriptionPlan.findOne,
+    userFindByPk: User.findByPk,
+  };
+
+  let created = false;
+  UserSubscription.findOne = async () => null; // no local row yet
+  UserSubscription.create = async () => {
+    created = true;
+    const error = new Error("FOREIGN KEY constraint fails");
+    error.name = "SequelizeForeignKeyConstraintError";
+    throw error;
+  };
+  SubscriptionPlan.findOne = async () => ({ id: 2 });
+  User.findByPk = async () => null; // user 123 is not in this database
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args);
+
+  try {
+    // customer.subscription.created whose customer metadata points at user 123
+    await webhook._private.syncSubscriptionFromStripe({
+      id: "sub_x",
+      customer: { id: "cus_x" },
+      status: "incomplete",
+      metadata: { userId: "123", planId: "2" },
+      items: { data: [{ price: { id: "price_1" } }] },
+    });
+  } finally {
+    UserSubscription.findOne = originals.subFindOne;
+    UserSubscription.create = originals.subCreate;
+    SubscriptionPlan.findOne = originals.planFindOne;
+    User.findByPk = originals.userFindByPk;
+    console.warn = originalWarn;
+  }
+
+  assert.equal(created, false, "must not try to create a row for a missing user");
+  assert.equal(warnings.length, 1);
 });
