@@ -1,5 +1,6 @@
 const { refreshTravelPlanStatuses } = require("./travelPlanStatusService");
 const { startNotificationCleanupJob } = require("./notificationCleanupService");
+const { startMessageCleanupJob } = require("./messageCleanupService");
 const { startMatchReminderEmailJob } = require("./emailReminderService");
 const { startSubscriptionResyncJob } = require("./subscriptionResyncService");
 const { startMatchNotificationRetryJob } = require("./matchNotificationRetryService");
@@ -38,6 +39,7 @@ function startBackgroundJobs() {
 
   refreshTravelPlanStatusesSafely();
   workers.push(startNotificationCleanupJob());
+  workers.push(startMessageCleanupJob());
   workers.push(startMatchReminderEmailJob());
   workers.push(startSubscriptionResyncJob());
   workers.push(startMatchNotificationRetryJob());

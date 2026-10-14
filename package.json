@@ -11,6 +11,8 @@
     "db:migrate:down": "node scripts/migrate.js down",
     "db:migrate:status": "node scripts/migrate.js status",
     "jobs:worker": "node scripts/runBackgroundJobs.js",
+    "chat:cleanup": "node scripts/runMessageCleanup.js",
+    "chat:cleanup:dry": "node scripts/runMessageCleanup.js --dry-run",
     "chat:backfill": "node scripts/backfillConversations.js",
     "chat:backfill:dry": "node scripts/backfillConversations.js --dry-run",
     "chat:migrate:conversation-id:dry": "node scripts/migrateMessageConversationIds.js --dry-run",

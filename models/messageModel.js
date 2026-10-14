@@ -84,6 +84,10 @@ const Message = sequelize.define(
         fields: ['receiverId', 'isRead'],
       },
       {
+        name: 'idx_messages_created_at',
+        fields: ['createdAt'],
+      },
+      {
         name: 'idx_sender_receiver',
         fields: ['senderId', 'receiverId'],
       },
