@@ -32,6 +32,17 @@ const UserSubscription = require("../models/UserSubscription");
 const userController = require("../controllers/userController");
 const hireController = require("../controllers/hireController");
 const locationController = require("../controllers/locationController");
+const {
+  getStatusForTravelWindow,
+} = require("../services/travelPlanStatusService");
+const {
+  isDateMatch,
+  getZonedDateKey,
+  closestPointOnLeg,
+  getLegCandidates,
+} = require("../services/travelAlertService");
+const liveLocationService = require("../services/liveLocationService");
+const TradesmanDetails = require("../models/TradesmanDetails");
 const clientBookingController = require("../controllers/clientBookingController");
 const { verifyToken } = require("../middlewares/authMiddleware");
 const socketModule = require("../socket");
@@ -47,6 +58,9 @@ const saved = {
   hireFindOne: Hire.findOne,
   hireCreate: Hire.create,
   planFindAll: TravelPlan.findAll,
+  planFindOne: TravelPlan.findOne,
+  planUpdate: TravelPlan.update,
+  planCreate: TravelPlan.create,
   subFindOne: UserSubscription.findOne,
   emitToUser: socketModule.emitToUser,
   consoleLog: console.log,
@@ -68,6 +82,9 @@ test.afterEach(() => {
   Hire.create = saved.hireCreate;
   sentNotifications.length = 0;
   TravelPlan.findAll = saved.planFindAll;
+  TravelPlan.findOne = saved.planFindOne;
+  TravelPlan.update = saved.planUpdate;
+  TravelPlan.create = saved.planCreate;
   UserSubscription.findOne = saved.subFindOne;
   socketModule.emitToUser = saved.emitToUser;
   console.log = saved.consoleLog;
@@ -762,6 +779,177 @@ test("a description over 2000 characters is still rejected", async () => {
 
   assert.equal(response.statusCode, 400);
   assert.match(response.body.message, /2000 characters/);
+});
+
+// ------------------------------------------- travel plan dates and ending a plan
+
+test("a plan stays running for the whole destination day", () => {
+  // Destination date 22 Oct picked in India (+05:30): the app sends the END of
+  // that day. It used to send midnight, so the plan closed 24 hours too early.
+  const start = "2026-10-13T18:30:00.000Z";
+  const endOfDestinationDay = "2026-10-22T18:29:59.999Z";
+
+  assert.equal(getStatusForTravelWindow(start, endOfDestinationDay, new Date("2026-10-22T10:00:00Z")), "running");
+  assert.equal(getStatusForTravelWindow(start, endOfDestinationDay, new Date("2026-10-22T18:29:00Z")), "running");
+  assert.equal(getStatusForTravelWindow(start, endOfDestinationDay, new Date("2026-10-22T18:31:00Z")), "closed");
+  assert.equal(getStatusForTravelWindow(start, endOfDestinationDay, new Date("2026-10-12T00:00:00Z")), "open");
+});
+
+test("today is accepted as the destination date", async () => {
+  const now = new Date();
+  const todayLocalEnd = new Date(now);
+  todayLocalEnd.setHours(23, 59, 59, 999);
+  // Make sure the end of "today" is still in the future for this assertion.
+  const destination = todayLocalEnd > now ? todayLocalEnd : new Date(now.getTime() + 3600 * 1000);
+
+  UserSubscription.findOne = async () => ({ plan: { name: "Pro", maxSharedLocations: 5 } });
+  TravelPlan.update = async () => [0];
+  TravelPlan.findOne = async () => null;
+  let created;
+  TravelPlan.create = async (values) => {
+    created = values;
+    return { id: 1, ...values };
+  };
+
+  const { res, response } = makeRes();
+  await locationController.createTravelPlan(
+    {
+      user: { id: 5, role: "tradesman" },
+      body: {
+        startLocation: "Perth",
+        destination: "Sydney",
+        startDateTime: new Date(now.getTime() - 3600 * 1000).toISOString(),
+        destinationDateTime: destination.toISOString(),
+        latitude: -31.9,
+        longitude: 115.8,
+        destinationLatitude: -33.8,
+        destinationLongitude: 151.2,
+      },
+    },
+    res
+  );
+
+  assert.equal(response.statusCode, 201, JSON.stringify(response.body));
+  assert.equal(created.status, "running");
+});
+
+test("alert dates compare by calendar day in the app time zone, not UTC", () => {
+  // A stop on 15 Oct at local noon in Perth, Sydney or India is the same
+  // calendar day in the app time zone...
+  assert.equal(getZonedDateKey("2026-10-15T04:00:00.000Z"), "2026-10-15"); // noon Perth
+  assert.equal(getZonedDateKey("2026-10-15T02:00:00.000Z"), "2026-10-15"); // noon Sydney is 01:00Z in DST
+  // ...and the start of 14 Oct in Sydney (13 Oct 13:00Z) is 14 Oct, not 13 Oct.
+  assert.equal(getZonedDateKey("2026-10-13T13:00:00.000Z"), "2026-10-14");
+  assert.equal(getZonedDateKey("not a date"), null);
+});
+
+test("an alert window matches a plan point on its own calendar day", () => {
+  const alertStart = "2026-10-14T00:00:00.000Z";
+  const alertEnd = "2026-10-31T00:00:00.000Z";
+
+  // 14 Oct 00:00 in Sydney = 13 Oct 13:00Z. The UTC day (13 Oct) used to fall
+  // outside the alert's window even though the trip starts on the 14th.
+  assert.equal(isDateMatch(alertStart, alertEnd, "2026-10-13T13:00:00.000Z"), true);
+  // The day before the window still does not match.
+  assert.equal(isDateMatch(alertStart, alertEnd, "2026-10-12T13:00:00.000Z"), false);
+  // After the window does not match; no window matches everything.
+  assert.equal(isDateMatch(alertStart, alertEnd, "2026-11-01T01:00:00.000Z"), false);
+  assert.equal(isDateMatch(null, null, null), true);
+});
+
+test("the closest spot on a leg is found between its ends", () => {
+  // Leg runs due east along latitude -30; the client is 10 km north of its middle.
+  const a = { latitude: -30, longitude: 140 };
+  const b = { latitude: -30, longitude: 142 };
+  const hit = closestPointOnLeg(a, b, -29.91, 141);
+
+  assert.ok(Math.abs(hit.t - 0.5) < 0.01);
+  assert.ok(hit.distanceKm > 9 && hit.distanceKm < 11, String(hit.distanceKm));
+});
+
+test("a client between two stops matches, with an interpolated arrival day", () => {
+  const points = [
+    { name: "Perth", latitude: -30, longitude: 140, expectedDateTime: "2026-10-14T00:00:00.000Z" },
+    { name: "Broken Hill", latitude: -30, longitude: 142, expectedDateTime: "2026-10-18T00:00:00.000Z" },
+  ];
+
+  const [leg] = getLegCandidates(points, -29.95, 141);
+  assert.equal(leg.name, "Between Perth and Broken Hill");
+  assert.ok(leg.distanceKm < 6);
+  // Halfway along a 4-day leg: two days in.
+  assert.equal(new Date(leg.expectedDateTime).toISOString().slice(0, 10), "2026-10-16");
+});
+
+test("a client at an end of the leg is left to the point match", () => {
+  const points = [
+    { name: "A", latitude: -30, longitude: 140, expectedDateTime: null },
+    { name: "B", latitude: -30, longitude: 142, expectedDateTime: null },
+  ];
+  assert.deepEqual(getLegCandidates(points, -30.2, 139.5), []);
+  assert.deepEqual(getLegCandidates(points, -30.2, 142.5), []);
+  assert.deepEqual(getLegCandidates([points[0]], -30, 141), []);
+});
+
+test("live location only counts a plan that is running, not an upcoming one", async () => {
+  const savedDetails = TradesmanDetails.findOne;
+  TradesmanDetails.findOne = async () => ({ tradeTypeId: 5 });
+  TravelPlan.update = async () => [0];
+  let where;
+  TravelPlan.findOne = async (query) => {
+    where = query.where;
+    return null;
+  };
+
+  try {
+    const result = await liveLocationService.processLiveLocation({
+      tradesmanId: 5,
+      latitude: -30,
+      longitude: 140,
+    });
+    assert.equal(result.reason, "NO_ACTIVE_TRAVEL_PLAN");
+    assert.equal(where.status, "running");
+  } finally {
+    TradesmanDetails.findOne = savedDetails;
+  }
+});
+
+test("ending a plan closes it and does not need a subscription", async () => {
+  let subscriptionChecked = false;
+  UserSubscription.findOne = async () => {
+    subscriptionChecked = true;
+    return null;
+  };
+  TravelPlan.update = async () => [0];
+
+  const plan = { id: 9, status: "running", saved: false, async save() { this.saved = true; } };
+  TravelPlan.findOne = async () => plan;
+
+  const { res, response } = makeRes();
+  await locationController.closeMyTravelPlan({ user: { id: 5, role: "tradesman" } }, res);
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(plan.status, "closed");
+  assert.equal(plan.saved, true);
+  assert.equal(subscriptionChecked, false, "closing must not require a subscription");
+});
+
+test("ending a plan: 404 without an active plan, 403 for clients", async () => {
+  TravelPlan.update = async () => [0];
+  TravelPlan.findOne = async () => null;
+
+  let result = makeRes();
+  await locationController.closeMyTravelPlan({ user: { id: 5, role: "tradesman" } }, result.res);
+  assert.equal(result.response.statusCode, 404);
+
+  result = makeRes();
+  await locationController.closeMyTravelPlan({ user: { id: 9, role: "client" } }, result.res);
+  assert.equal(result.response.statusCode, 403);
+});
+
+test("the close-plan route requires a login", () => {
+  const fs = require("node:fs");
+  const routes = fs.readFileSync(path.join(__dirname, "../routes/locationRoutes.js"), "utf8");
+  assert.match(routes, /router\.post\("\/my\/close", verifyToken, locationController\.closeMyTravelPlan\)/);
 });
 
 test("a socket failure never fails the hire request", async () => {

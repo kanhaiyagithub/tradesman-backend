@@ -13,6 +13,7 @@ const {
   verifyRefreshToken,
 } = require("../utils/authTokens");
 const { ACTIVE_TRAVEL_PLAN_STATUSES } = require("../services/travelPlanStatusService");
+const { getLegCandidates } = require("../services/travelAlertService");
 
 const DEFAULT_FILTER_RADIUS_KM = 15;
 // Upper limit for an app-supplied radiusKm.
@@ -468,6 +469,46 @@ const getRoutePointsFromTravelPlan = (travelPlan) => {
   }
 
   return points
+    .filter((point) => hasCoordinate(point.latitude) && hasCoordinate(point.longitude))
+    .map((point) => ({
+      ...point,
+      latitude: Number(point.latitude),
+      longitude: Number(point.longitude),
+    }));
+};
+
+/**
+ * Route points in travel order (start, stops, destination), for working out
+ * where the tradesman passes *between* them.
+ */
+const getOrderedRoutePointsFromTravelPlan = (travelPlan) => {
+  if (!travelPlan) return [];
+
+  const stops =
+    travelPlan.allowStops && Array.isArray(travelPlan.stops) ? travelPlan.stops : [];
+
+  return [
+    {
+      name: travelPlan.startLocation || travelPlan.currentLocation || "Start",
+      latitude: travelPlan.latitude,
+      longitude: travelPlan.longitude,
+      expectedDateTime: travelPlan.startDateTime || null,
+    },
+    ...stops
+      .filter((stop) => stop && typeof stop === "object")
+      .map((stop) => ({
+        name: stop.name || "Stop",
+        latitude: stop.latitude,
+        longitude: stop.longitude,
+        expectedDateTime: stop.expectedDateTime || null,
+      })),
+    {
+      name: travelPlan.destination || "Destination",
+      latitude: travelPlan.destinationLatitude,
+      longitude: travelPlan.destinationLongitude,
+      expectedDateTime: travelPlan.destinationDateTime || null,
+    },
+  ]
     .filter((point) => hasCoordinate(point.latitude) && hasCoordinate(point.longitude))
     .map((point) => ({
       ...point,
@@ -2032,6 +2073,18 @@ exports.filterTradesmen = async (req, res) => {
 
           for (const travelPlan of travelPlans) {
             const stopPoints = getRoutePointsFromTravelPlan(travelPlan);
+
+            // Also the road between consecutive points, so a client on the way
+            // between two stops still finds the tradesman.
+            if (requestedLatitude !== null && requestedLongitude !== null) {
+              stopPoints.push(
+                ...getLegCandidates(
+                  getOrderedRoutePointsFromTravelPlan(travelPlan),
+                  requestedLatitude,
+                  requestedLongitude,
+                ),
+              );
+            }
 
             for (const stop of stopPoints) {
               if (

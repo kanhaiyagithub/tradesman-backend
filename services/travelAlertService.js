@@ -96,6 +96,33 @@ function endOfCalendarDay(value) {
  * @param {Date|string|null|undefined} value - Date-like input.
  * @returns {string|null} Date key in YYYY-MM-DD format.
  */
+/**
+ * Calendar day ("YYYY-MM-DD") of a point in time, in the app's time zone.
+ *
+ * Travel-plan times are real instants (the app sends UTC times), while client
+ * alert dates are plain calendar dates. To compare them the instant must be
+ * turned back into the calendar day people mean, which depends on a time zone.
+ * Using the UTC day was off by one for anyone ahead of UTC (all of Australia).
+ *
+ * Configure with ALERT_DATE_TIMEZONE (an IANA name); defaults to
+ * Australia/Sydney because the app only supports Australian locations.
+ */
+const ALERT_DATE_TIME_ZONE = process.env.ALERT_DATE_TIMEZONE || "Australia/Sydney";
+
+function getZonedDateKey(value, timeZone = ALERT_DATE_TIME_ZONE) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+
+  // The en-CA locale formats dates as YYYY-MM-DD.
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
 function getUtcDateKey(value) {
   const day = startOfCalendarDay(value);
   if (!day) return null;
@@ -119,7 +146,10 @@ function isDateMatch(jobStartDate, jobEndDate, pointDateTime) {
   // If the client supplied a date constraint, an undated route point is unsafe.
   if (!pointDateTime) return false;
 
-  const pointDateKey = getUtcDateKey(pointDateTime);
+  // The point is an instant: compare it by its calendar day in the app's
+  // time zone. The alert's own dates are plain dates (UTC midnight), so they
+  // keep using their UTC day below.
+  const pointDateKey = getZonedDateKey(pointDateTime);
 
   if (!pointDateKey) return false;
 
@@ -255,6 +285,83 @@ function getTravelPoints(travelPlan) {
 }
 
 /**
+ * Closest point to (lat, lng) on the straight leg A -> B.
+ *
+ * Uses a flat (equirectangular) approximation, which is accurate to well under
+ * a percent for the few-hundred-km legs of a trip. Returns the fraction `t`
+ * along the leg (0 = A, 1 = B) and the distance in km.
+ */
+function closestPointOnLeg(a, b, lat, lng) {
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  const ax = a.longitude * cosLat;
+  const ay = a.latitude;
+  const bx = b.longitude * cosLat;
+  const by = b.latitude;
+  const px = lng * cosLat;
+  const py = lat;
+
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lengthSq = dx * dx + dy * dy;
+  const t = lengthSq === 0
+    ? 0
+    : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lengthSq));
+
+  const latitude = a.latitude + t * (b.latitude - a.latitude);
+  const longitude = a.longitude + t * (b.longitude - a.longitude);
+
+  return {
+    t,
+    latitude,
+    longitude,
+    distanceKm: getDistanceKm(lat, lng, latitude, longitude),
+  };
+}
+
+/**
+ * Candidate places along the route *between* consecutive points.
+ *
+ * Matching only the start, stops and destination misses a client who lives
+ * on the road between two stops. For each leg this returns the closest spot on
+ * it (as the crow flies) with an arrival time interpolated between the two
+ * ends. Spots at (or next to) an end are skipped: those are already covered by
+ * the point match.
+ *
+ * @param {Array<{name: string, latitude: number, longitude: number, expectedDateTime: Date|string|null}>} orderedPoints
+ *   Route points in travel order (start, stops..., destination).
+ * @returns {Array<{type: "route", name: string, latitude: number, longitude: number, expectedDateTime: Date|null, distanceKm: number}>}
+ */
+function getLegCandidates(orderedPoints, lat, lng) {
+  const candidates = [];
+
+  for (let i = 0; i < orderedPoints.length - 1; i++) {
+    const a = orderedPoints[i];
+    const b = orderedPoints[i + 1];
+    const closest = closestPointOnLeg(a, b, lat, lng);
+
+    if (closest.t <= 0.02 || closest.t >= 0.98) continue;
+
+    const aTime = a.expectedDateTime ? new Date(a.expectedDateTime).getTime() : NaN;
+    const bTime = b.expectedDateTime ? new Date(b.expectedDateTime).getTime() : NaN;
+    const expectedDateTime =
+      !Number.isNaN(aTime) && !Number.isNaN(bTime)
+        ? new Date(aTime + closest.t * (bTime - aTime))
+        : null;
+
+    candidates.push({
+      type: "route",
+      name: `Between ${a.name} and ${b.name}`,
+      latitude: closest.latitude,
+      longitude: closest.longitude,
+      expectedDateTime,
+      distanceKm: closest.distanceKm,
+    });
+  }
+
+  return candidates;
+}
+
+/**
  * Finds the closest route point that satisfies the client's trade type, radius,
  * and date window constraints.
  *
@@ -331,6 +438,20 @@ function findBestRoutePointForAlert(alert, travelPlan, logContext = null) {
 
     if (!bestMatch || distance < bestMatch.distance) {
       bestMatch = { point, distance };
+    }
+  }
+
+  // Also consider the road between consecutive points.
+  for (const leg of getLegCandidates(
+    travelPoints,
+    Number(alert.latitude),
+    Number(alert.longitude),
+  )) {
+    if (leg.distanceKm > Number(alert.radiusKm)) continue;
+    if (!isDateMatch(alert.startDate, alert.endDate, leg.expectedDateTime)) continue;
+
+    if (!bestMatch || leg.distanceKm < bestMatch.distance) {
+      bestMatch = { point: leg, distance: leg.distanceKm };
     }
   }
 
@@ -793,6 +914,9 @@ module.exports = {
   getTravelPoints,
   normalizeTravelStops,
   isDateMatch,
+  getZonedDateKey,
+  closestPointOnLeg,
+  getLegCandidates,
   matchClientTradeAlertWithTravelPlans,
   matchTravelPlanWithAlerts,
 };

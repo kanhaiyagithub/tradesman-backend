@@ -7,7 +7,7 @@ const LiveProximityNotification = require("../models/LiveProximityNotification")
 const TravelPlanAlertMatch = require("../models/travelPlanAlertMatchModel");
 const User = require("../models/User");
 const {
-  buildActiveOrUpcomingPlanWhere,
+  buildRunningPlanWhere,
   refreshTravelPlanStatuses,
 } = require("./travelPlanStatusService");
 const {
@@ -127,13 +127,15 @@ async function processLiveLocation({ tradesmanId, latitude, longitude }) {
 
   await refreshTravelPlanStatuses({ tradesmanId, now });
 
+  // Only a plan that has started counts: someone whose trip begins next week
+  // is not "nearby now", whatever their phone says today.
   const activeTravelPlan = await TravelPlan.findOne({
-    where: buildActiveOrUpcomingPlanWhere(tradesmanId, now),
+    where: buildRunningPlanWhere(tradesmanId, now),
     order: [["id", "DESC"]],
   });
 
   if (!activeTravelPlan) {
-    console.log("[LIVE] No active travel plan found, skipping live proximity", {
+    console.log("[LIVE] No running travel plan found, skipping live proximity", {
       tradesmanId,
     });
     return { success: false, reason: "NO_ACTIVE_TRAVEL_PLAN" };

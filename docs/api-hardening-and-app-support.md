@@ -50,3 +50,20 @@ Tests: `tests/publicApiHardening.test.js` (mocked models) covers each of the abo
 - `POST /api/hire/request` no longer requires `jobDescription`. It is optional: when omitted or blank the hire is stored with `jobDescription: null` (the column was already nullable). A description over 2000 characters is still rejected with 400.
 - The tradesman's "New Job Request" notification reads "<client> has sent you a hire request." when there is no description, and keeps "<client> wants to hire you for: <description>" when one is sent, so older clients keep working.
 - Tests: four new cases in `tests/publicApiHardening.test.js` (no description, blank description, description kept, over-length rejected).
+
+## F. Travel plan dates and ending a plan
+
+**Dates are real instants.** The app now sends UTC times (ending in `Z`):
+`startDateTime` = start of the first day, `destinationDateTime` = end of the
+last day (23:59:59.999), stop `expectedDateTime` = noon of that day. The
+server's own time zone therefore no longer matters, the destination day is
+fully covered, and today can be chosen as the destination.
+
+**Alert matching** compares a plan point's calendar day in `ALERT_DATE_TIMEZONE`
+(default `Australia/Sydney`) against the alert's plain dates (UTC date part).
+Plans saved before this change keep their old midnight values until the
+tradesman saves the plan again.
+
+**POST `/api/locations/my/close`** (tradesman only, no subscription needed)
+sets the active or upcoming plan to `closed` and returns it
+(`200 "Travel plan closed"`), or `404 "No active travel plan found"`.

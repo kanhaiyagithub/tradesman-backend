@@ -91,8 +91,21 @@ function buildActiveOrUpcomingPlanWhere(tradesmanId, now = new Date()) {
   };
 }
 
+/**
+ * Where-clause for a plan that is under way right now (not merely upcoming).
+ * Call refreshTravelPlanStatuses first so "running" reflects the clock.
+ */
+function buildRunningPlanWhere(tradesmanId, now = new Date()) {
+  return {
+    tradesmanId,
+    status: "running",
+    destinationDateTime: { [Op.gte]: now },
+  };
+}
+
 module.exports = {
   ACTIVE_TRAVEL_PLAN_STATUSES,
+  buildRunningPlanWhere,
   TRAVEL_PLAN_STATUSES,
   buildActiveOrUpcomingPlanWhere,
   getStatusForTravelWindow,

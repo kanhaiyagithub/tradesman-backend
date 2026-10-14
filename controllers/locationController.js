@@ -654,6 +654,48 @@ exports.updateMyTravelPlan = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/locations/my/close
+ *
+ * Ends the tradesman's active or upcoming travel plan right away. The plan is
+ * kept (status "closed") so history and past matches are not lost, and a new
+ * plan can be created straight away.
+ *
+ * Unlike editing a plan, ending one does not need a subscription: a tradesman
+ * whose subscription lapsed must still be able to stop appearing as travelling.
+ */
+exports.closeMyTravelPlan = async (req, res) => {
+  try {
+    const { id: userId, role } = req.user;
+
+    if (role !== "tradesman") {
+      return sendResponse(res, 403, false, "Only tradesmen allowed");
+    }
+
+    const now = new Date();
+
+    await refreshTravelPlanStatuses({ tradesmanId: userId, now });
+
+    const plan = await TravelPlan.findOne({
+      where: buildActiveOrUpcomingPlanWhere(userId, now),
+      order: [["startDateTime", "ASC"]],
+    });
+
+    if (!plan) {
+      return sendResponse(res, 404, false, "No active travel plan found");
+    }
+
+    plan.status = "closed";
+    await plan.save();
+
+    return sendResponse(res, 200, true, "Travel plan closed", plan);
+  } catch (err) {
+    console.error(err);
+
+    return sendResponse(res, 500, false, "Server error");
+  }
+};
+
 exports.deleteTravelPlan = async (req, res) => {
   try {
     const plan = await TravelPlan.findByPk(req.params.id);

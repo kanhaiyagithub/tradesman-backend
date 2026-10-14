@@ -16,6 +16,9 @@ router.put(
     locationController.updateMyTravelPlan
 );
 
+// End (close) the active travel plan
+router.post("/my/close", verifyToken, locationController.closeMyTravelPlan);
+
 // Delete travel plan
 router.delete("/:id", verifyToken, locationController.deleteTravelPlan);
 
