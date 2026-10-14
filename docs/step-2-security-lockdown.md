@@ -113,7 +113,7 @@ SMTP_FROM="Touring Trades <your-email@example.com>"
 - Add database-level unique email enforcement with a migration.
 - Move rate limiting to a shared store before running multiple API instances.
 - Add security headers with a package such as `helmet`.
-- Review public directory/profile endpoints and decide which should require auth.
+- ~~Review public directory/profile endpoints and decide which should require auth.~~ Done, see `docs/api-hardening-and-app-support.md`.
 - Add tests for auth, password reset, admin registration, deletion scope, and hire status transitions.
 - Ensure Firebase credentials and all secrets stay out of git.
 

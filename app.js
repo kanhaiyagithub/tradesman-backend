@@ -9,6 +9,11 @@ const { isOriginAllowed } = require('./utils/securityConfig');
 // dotenv.config({ path: './config/config.env' });
 dotenv.config();
 
+// A default signing secret is unsafe in production: fail fast when it is missing.
+if (!process.env.SESSION_SECRET) {
+  throw new Error('SESSION_SECRET is required. Set it in the environment before starting the server.');
+}
+
 require('./config/passport');
 
 const stripeWebhookController = require('./controllers/stripeWebhookController');
@@ -78,7 +83,7 @@ app.use(
 
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || 'your_secret_key',
+    secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
   })

@@ -96,6 +96,12 @@ module.exports = {
         }
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        // Refresh tokens are only valid at POST /api/users/refresh-token.
+        if (decoded.type === "refresh") {
+          return next(new Error("Unauthorized"));
+        }
+
         socket.user = decoded;
         next();
       } catch (error) {

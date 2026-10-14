@@ -51,6 +51,43 @@ const notifyUser = (userId, title, body, data) => {
   });
 };
 
+/**
+ * Real-time socket events for hire changes, sent to BOTH users of the hire.
+ *
+ * - "hire-updated": any hire change (requested, accepted/rejected, cancelled,
+ *   completion requested/rejected, completed). Payload: { hireId, status,
+ *   requestCompletion, clientId, tradesmanId, reason, at }.
+ * - "completion-requested": the tradesman asked the client to confirm completion.
+ * - "job-completed": the client confirmed completion.
+ *
+ * Push notifications still go out as before; this is the live-refresh channel.
+ * Never throws: a socket problem must not fail the API request. Delivery is to
+ * sockets connected to THIS server process only.
+ */
+const emitHireEvents = (hire, reason, extraEvents = []) => {
+  try {
+    // Lazy require: socket.js is initialised by the server, not by tests.
+    const { emitToUser } = require("../socket");
+
+    const payload = {
+      hireId: hire.id,
+      status: hire.status,
+      requestCompletion: Boolean(hire.requestCompletion),
+      clientId: hire.clientId,
+      tradesmanId: hire.tradesmanId,
+      reason,
+      at: new Date().toISOString(),
+    };
+
+    for (const eventName of ["hire-updated", ...extraEvents]) {
+      emitToUser(hire.clientId, eventName, payload);
+      emitToUser(hire.tradesmanId, eventName, payload);
+    }
+  } catch (error) {
+    console.error("[HIRE_SOCKET_EVENT_ERROR]", error.message);
+  }
+};
+
 exports.requestHire = async (req, res) => {
   try {
     const clientId = req.user.id;
@@ -73,10 +110,8 @@ exports.requestHire = async (req, res) => {
       return sendResponse(res, 400, false, "tradesmanId must be a positive integer");
     }
 
-    if (!jobDescription) {
-      return sendResponse(res, 400, false, "jobDescription is required");
-    }
-
+    // jobDescription is optional: the mobile app does not collect one. Older
+    // clients may still send it, so it is stored and shown when present.
     if (jobDescription.length > 2000) {
       return sendResponse(res, 400, false, "jobDescription must be 2000 characters or less");
     }
@@ -117,7 +152,7 @@ exports.requestHire = async (req, res) => {
     const hire = await Hire.create({
       clientId,
       tradesmanId,
-      jobDescription,
+      jobDescription: jobDescription || null,
       status: "pending",
       requestCompletion: false,
     });
@@ -126,9 +161,12 @@ exports.requestHire = async (req, res) => {
     notifyUser(
       tradesmanId,
       "New Job Request",
-      `${client?.name || "A client"} wants to hire you for: ${jobDescription}`,
+      jobDescription
+        ? `${client?.name || "A client"} wants to hire you for: ${jobDescription}`
+        : `${client?.name || "A client"} has sent you a hire request.`,
       { hireId: hire.id, type: "NEW_HIRE" }
     );
+    emitHireEvents(hire, "requested");
 
     return sendResponse(res, 201, true, "Hire request sent", hire);
   } catch (err) {
@@ -179,6 +217,7 @@ exports.respondHire = async (req, res) => {
       `${tradesman?.name || "The tradesman"} has ${action}ed your hire request.`,
       { hireId: hire.id, type: "HIRE_RESPONSE", status: hire.status }
     );
+    emitHireEvents(hire, action === "accept" ? "accepted" : "rejected");
 
     return sendResponse(res, 200, true, "Hire updated", hire);
   } catch (err) {
@@ -236,6 +275,7 @@ exports.cancelHire = async (req, res) => {
       `${actor?.name || "The other party"} cancelled the hire${reason ? `: ${reason}` : "."}`,
       { hireId: hire.id, type: "HIRE_CANCELLED", status: hire.status }
     );
+    emitHireEvents(hire, "cancelled");
 
     return sendResponse(res, 200, true, "Hire cancelled", hire);
   } catch (err) {
@@ -291,6 +331,7 @@ exports.requestJobCompletion = async (req, res) => {
       `${tradesman?.name || "The tradesman"} has marked the job as finished and is awaiting your confirmation.`,
       { hireId: hire.id, type: "COMPLETION_REQUESTED" }
     );
+    emitHireEvents(hire, "completion_requested", ["completion-requested"]);
 
     return sendResponse(res, 200, true, "Completion request sent");
   } catch (err) {
@@ -341,6 +382,7 @@ exports.confirmJobCompletion = async (req, res) => {
     if (!confirm) {
       hire.requestCompletion = false;
       await hire.save();
+      emitHireEvents(hire, "completion_rejected");
       return sendResponse(res, 200, true, "Completion rejected");
     }
 
@@ -355,6 +397,7 @@ exports.confirmJobCompletion = async (req, res) => {
       `${client?.name || "The client"} has confirmed the job completion.`,
       { hireId: hire.id, type: "JOB_COMPLETED" }
     );
+    emitHireEvents(hire, "completed", ["job-completed"]);
 
     return sendResponse(res, 200, true, "Job completed", hire);
   } catch (err) {

@@ -7,9 +7,18 @@ const TravelPlan = require("../models/locationModel");
 const TradesType = require("../models/tradesTypeModel");
 const storageService = require("../services/storage/storageService");
 const metaConversionService = require("../services/metaConversionService");
+const {
+  passwordFingerprint,
+  signRefreshToken,
+  verifyRefreshToken,
+} = require("../utils/authTokens");
 const { ACTIVE_TRAVEL_PLAN_STATUSES } = require("../services/travelPlanStatusService");
 
 const DEFAULT_FILTER_RADIUS_KM = 15;
+// Upper limit for an app-supplied radiusKm.
+const MAX_FILTER_RADIUS_KM = 100;
+// Upper limit for the optional `limit` of the filter endpoint.
+const MAX_FILTER_PAGE_SIZE = 100;
 
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -230,6 +239,66 @@ const signToken = (user) => {
   );
 };
 
+/**
+ * POST /api/users/refresh-token
+ * Exchanges a valid refresh token for a new access token (and a new refresh
+ * token). Fails with 401 + code TOKEN_EXPIRED / TOKEN_INVALID otherwise.
+ */
+exports.refreshToken = async (req, res) => {
+  try {
+    const refreshToken = req.body?.refreshToken;
+
+    if (!refreshToken || typeof refreshToken !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "refreshToken is required",
+        code: "REFRESH_TOKEN_MISSING",
+      });
+    }
+
+    let decoded;
+    try {
+      decoded = verifyRefreshToken(refreshToken);
+    } catch (error) {
+      const expired = error.name === "TokenExpiredError";
+      return res.status(401).json({
+        success: false,
+        message: expired ? "Refresh token expired" : "Invalid refresh token",
+        code: expired ? "TOKEN_EXPIRED" : "TOKEN_INVALID",
+      });
+    }
+
+    const user = await User.findByPk(decoded.id);
+
+    // A changed/reset password invalidates every refresh token issued before it.
+    if (!user || decoded.pv !== passwordFingerprint(user)) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid refresh token",
+        code: "TOKEN_INVALID",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Token refreshed",
+      data: {
+        token: signToken(user),
+        refreshToken: signRefreshToken(user),
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Refresh Token Error:", error);
+    return sendResponse(res, 500, false, "Server error");
+  }
+};
+
 const PASSWORD_RESET_OTP_TTL_MS = 10 * 60 * 1000;
 const PASSWORD_RESET_TOKEN_TTL_MS = 15 * 60 * 1000;
 const PASSWORD_RESET_OTP_PREFIX = "otp:";
@@ -353,24 +422,58 @@ const normalizeDateOrNull = (value) => {
   return Number.isNaN(date.getTime()) ? null : date;
 };
 
-const getStopPointsFromTravelPlan = (travelPlan) => {
-  if (!travelPlan?.allowStops || !Array.isArray(travelPlan.stops)) {
-    return [];
+const hasCoordinate = (value) =>
+  value !== null &&
+  value !== undefined &&
+  value !== "" &&
+  Number.isFinite(Number(value));
+
+/**
+ * Every place a tradesman is or will be on a travel plan, for location search:
+ * the current position, the destination and any intermediate stops. Searching
+ * used to look at stops only, so a plan without stops (the common case) never
+ * matched a location search.
+ *
+ * Dates (used by the date-range filter): the current position counts from the
+ * plan start, the destination at the destination time, stops at their own time.
+ */
+const getRoutePointsFromTravelPlan = (travelPlan) => {
+  if (!travelPlan) return [];
+
+  const points = [
+    {
+      name: travelPlan.currentLocation || "Current location",
+      latitude: travelPlan.latitude,
+      longitude: travelPlan.longitude,
+      expectedDateTime: travelPlan.startDateTime || null,
+    },
+    {
+      name: travelPlan.destination || "Destination",
+      latitude: travelPlan.destinationLatitude,
+      longitude: travelPlan.destinationLongitude,
+      expectedDateTime: travelPlan.destinationDateTime || null,
+    },
+  ];
+
+  if (travelPlan.allowStops && Array.isArray(travelPlan.stops)) {
+    for (const stop of travelPlan.stops) {
+      if (!stop || typeof stop !== "object") continue;
+      points.push({
+        name: stop.name || "Stop",
+        latitude: stop.latitude,
+        longitude: stop.longitude,
+        expectedDateTime: stop.expectedDateTime || null,
+      });
+    }
   }
 
-  return travelPlan.stops
-    .filter((stop) => stop && typeof stop === "object")
-    .map((stop) => ({
-      name: stop.name || "Stop",
-      latitude: Number(stop.latitude),
-      longitude: Number(stop.longitude),
-      expectedDateTime: stop.expectedDateTime || null,
-    }))
-    .filter(
-      (stop) =>
-        !Number.isNaN(stop.latitude) &&
-        !Number.isNaN(stop.longitude),
-    );
+  return points
+    .filter((point) => hasCoordinate(point.latitude) && hasCoordinate(point.longitude))
+    .map((point) => ({
+      ...point,
+      latitude: Number(point.latitude),
+      longitude: Number(point.longitude),
+    }));
 };
 
 const isStopWithinDateRange = (stop, startDate, endDate) => {
@@ -558,22 +661,28 @@ exports.login = async (req, res) => {
 
     const user = await User.findOne({ where: { email } });
     if (!user) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid email or password" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid email or password",
+        code: "INVALID_CREDENTIALS",
+      });
     }
 
     if (!user.password) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Please continue with Google login" });
+      return res.status(400).json({
+        success: false,
+        message: "Please continue with Google login",
+        code: "GOOGLE_ACCOUNT",
+      });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid email or password" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid email or password",
+        code: "INVALID_CREDENTIALS",
+      });
     }
 
     const token = signToken(user);
@@ -583,6 +692,7 @@ exports.login = async (req, res) => {
       message: "Login successful",
       data: {
         token,
+        refreshToken: signRefreshToken(user),
         user: {
           id: user.id,
           name: user.name,
@@ -598,9 +708,94 @@ exports.login = async (req, res) => {
 };
 
 /**
- * GET /api/users
+ * Average rating and review count for many users with ONE grouped query.
+ *
+ * @param {number[]} userIds - Reviewed user ids.
+ * @returns {Promise<Record<number, {avgRating: number, reviewCount: number}>>}
+ */
+const getRatingSummaryMap = async (userIds) => {
+  const ids = [...new Set((userIds || []).map(Number).filter(Boolean))];
+  if (!ids.length) return {};
+
+  const ratingRows = await Review.findAll({
+    attributes: [
+      "toUserId",
+      [fn("AVG", col("rating")), "avgRating"],
+      [fn("COUNT", col("id")), "reviewCount"],
+    ],
+    where: { toUserId: { [Op.in]: ids } },
+    group: ["toUserId"],
+    raw: true,
+  });
+
+  return Object.fromEntries(
+    ratingRows.map((item) => [
+      Number(item.toUserId),
+      {
+        avgRating: Number(Number(item.avgRating || 0).toFixed(1)),
+        reviewCount: Number(item.reviewCount || 0),
+      },
+    ])
+  );
+};
+
+/**
+ * The ONLY shape the public/directory endpoints return for a user. It never
+ * includes contact details (email, mobile), Google IDs, licence fields or
+ * approval fields.
+ *
+ * Tradesmen: id, name, role, profileImage, tradeType, tradeTypeId,
+ * businessName, shortBio, avgRating, reviewCount, isVerified (= approved).
+ * Everyone else: id, name, role, profileImage.
+ *
+ * `TradesmanDetail` is kept as a small nested object (same safe fields) so
+ * clients that read the old nested shape keep working.
+ *
+ * @param {object} userJson - Plain user (with optional TradesmanDetail).
+ * @param {{avgRating: number, reviewCount: number}} [ratingSummary]
+ */
+const toPublicUserProfile = (userJson, ratingSummary) => {
+  const publicProfile = {
+    id: userJson.id,
+    name: userJson.name,
+    role: userJson.role,
+    profileImage: toPublicProfileImage(userJson.profileImage),
+  };
+
+  if (userJson.role !== "tradesman") {
+    return publicProfile;
+  }
+
+  const detail = userJson.TradesmanDetail || null;
+  const summary = ratingSummary || { avgRating: 0, reviewCount: 0 };
+
+  return {
+    ...publicProfile,
+    tradeTypeId: detail?.tradeTypeId || null,
+    tradeType: detail?.tradeType || null,
+    businessName: detail?.businessName || null,
+    shortBio: detail?.shortBio || null,
+    avgRating: summary.avgRating,
+    reviewCount: summary.reviewCount,
+    isVerified: Boolean(detail?.isApproved),
+    TradesmanDetail: detail
+      ? {
+          tradeTypeId: detail.tradeTypeId || null,
+          tradeType: detail.tradeType || null,
+          businessName: detail.businessName || null,
+          shortBio: detail.shortBio || null,
+        }
+      : null,
+  };
+};
+
+/**
+ * GET /api/users   (requires login)
  * Supports pagination and optional search & role filter:
  * ?page=1&limit=10&search=deepak&role=tradesman
+ *
+ * Returns the public profile shape only. Search matches the name only, so the
+ * endpoint cannot be used to look up people by email or phone number.
  */
 exports.getAllUsers = async (req, res) => {
   try {
@@ -611,24 +806,31 @@ exports.getAllUsers = async (req, res) => {
     if (role) where.role = role;
 
     if (search) {
-      where[Op.or] = [
-        { name: { [Op.like]: `%${search}%` } }, // For Postgres; with other DBs use Op.substring or adjust as needed
-        { email: { [Op.like]: `%${search}%` } },
-        { mobile: { [Op.like]: `%${search}%` } },
-      ];
+      where.name = { [Op.like]: `%${search}%` };
     }
 
     // use findAndCountAll for pagination metadata
     const result = await User.findAndCountAll({
       where,
-      include: [{ model: TradesmanDetails, as: "TradesmanDetail" }],
+      attributes: ["id", "name", "role", "profileImage"],
+      include: [
+        {
+          model: TradesmanDetails,
+          as: "TradesmanDetail",
+          attributes: ["tradeTypeId", "tradeType", "businessName", "shortBio", "isApproved"],
+        },
+      ],
       limit,
       offset,
       order: [["createdAt", "DESC"]],
     });
 
+    const ratingMap = await getRatingSummaryMap(
+      result.rows.filter((row) => row.role === "tradesman").map((row) => row.id)
+    );
+
     result.rows = result.rows.map((row) =>
-      serializeUserWithTradesman(row.toJSON())
+      toPublicUserProfile(row.toJSON(), ratingMap[row.id])
     );
 
     return paginatedResponse(res, "Users fetched", result, page, limit);
@@ -640,7 +842,7 @@ exports.getAllUsers = async (req, res) => {
 
 /**
  * GET /api/users/tradesmen
- * Public: lists tradesmen with their TradesmanDetails
+ * Public: lists APPROVED tradesmen (public profile shape only)
  * Supports pagination: ?page=1&limit=10
  * Optional filter: tradeType (e.g. ?tradeType=plumber)
  */
@@ -651,17 +853,13 @@ exports.getAllTradesmen = async (req, res) => {
 
     const whereUser = { role: "tradesman" };
 
-    // Search on user fields
+    // Search on the public name only (never email or mobile)
     if (search) {
-      whereUser[Op.or] = [
-        { name: { [Op.like]: `%${search}%` } },
-        { email: { [Op.like]: `%${search}%` } },
-        { mobile: { [Op.like]: `%${search}%` } },
-      ];
+      whereUser.name = { [Op.like]: `%${search}%` };
     }
 
-    // Filter on TradesmanDetails
-    const tradesmanWhere = {};
+    // Only approved tradesmen are listed, like the filter endpoint
+    const tradesmanWhere = { isApproved: true };
 
     if (
       tradeTypeId !== undefined &&
@@ -683,13 +881,14 @@ exports.getAllTradesmen = async (req, res) => {
 
     const result = await User.findAndCountAll({
       where: whereUser,
+      attributes: ["id", "name", "role", "profileImage"],
       include: [
         {
           model: TradesmanDetails,
           as: "TradesmanDetail",
-          where:
-            Object.keys(tradesmanWhere).length > 0 ? tradesmanWhere : undefined,
-          required: false,
+          attributes: ["tradeTypeId", "tradeType", "businessName", "shortBio", "isApproved"],
+          where: tradesmanWhere,
+          required: true,
         },
       ],
       limit,
@@ -701,16 +900,11 @@ exports.getAllTradesmen = async (req, res) => {
       return sendResponse(res, 404, false, "No tradesmen found");
     }
 
-    // add both tradeTypeId and tradeType clearly in response
-    const formattedRows = result.rows.map((user) => {
-      const userJson = user.toJSON();
+    const ratingMap = await getRatingSummaryMap(result.rows.map((row) => row.id));
 
-      return serializeUserWithTradesman({
-        ...userJson,
-        tradeTypeId: userJson.TradesmanDetail?.tradeTypeId || null,
-        tradeType: userJson.TradesmanDetail?.tradeType || null,
-      });
-    });
+    const formattedRows = result.rows.map((user) =>
+      toPublicUserProfile(user.toJSON(), ratingMap[user.id])
+    );
 
     return res.status(200).json({
       success: true,
@@ -730,8 +924,8 @@ exports.getAllTradesmen = async (req, res) => {
 };
 
 /**
- * GET /api/users/clients
- * Public: lists clients (role = client)
+ * GET /api/users/clients   (requires login)
+ * Lists clients (role = client): id, name, role, profileImage only.
  * Supports pagination ?page & ?limit
  */
 exports.getAllClients = async (req, res) => {
@@ -742,15 +936,12 @@ exports.getAllClients = async (req, res) => {
     const where = { role: "client" };
 
     if (search) {
-      where[Op.or] = [
-        { name: { [Op.like]: `%${search}%` } },
-        { email: { [Op.like]: `%${search}%` } },
-        { mobile: { [Op.like]: `%${search}%` } },
-      ];
+      where.name = { [Op.like]: `%${search}%` };
     }
 
     const result = await User.findAndCountAll({
       where,
+      attributes: ["id", "name", "role", "profileImage"],
       limit,
       offset,
       order: [["createdAt", "DESC"]],
@@ -760,9 +951,7 @@ exports.getAllClients = async (req, res) => {
       return sendResponse(res, 404, false, "No clients found");
     }
 
-    result.rows = result.rows.map((row) =>
-      serializeUserMedia(row.toJSON())
-    );
+    result.rows = result.rows.map((row) => toPublicUserProfile(row.toJSON()));
 
     return paginatedResponse(res, "Clients fetched", result, page, limit);
   } catch (error) {
@@ -771,27 +960,35 @@ exports.getAllClients = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/users/:id
+ * Public profile shape only (see toPublicUserProfile).
+ */
 exports.getUserById = async (req, res) => {
   try {
     const user = await User.findOne({
       where: { id: req.params.id },
-      include: [{ model: TradesmanDetails, as: "TradesmanDetail" }],
+      attributes: ["id", "name", "role", "profileImage"],
+      include: [
+        {
+          model: TradesmanDetails,
+          as: "TradesmanDetail",
+          attributes: ["tradeTypeId", "tradeType", "businessName", "shortBio", "isApproved"],
+        },
+      ],
     });
 
     if (!user) return sendResponse(res, 404, false, "User not found");
 
-    const userJson = user.toJSON();
+    const ratingMap =
+      user.role === "tradesman" ? await getRatingSummaryMap([user.id]) : {};
 
     return sendResponse(
       res,
       200,
       true,
       "User fetched",
-      serializeUserWithTradesman({
-        ...userJson,
-        tradeTypeId: userJson.TradesmanDetail?.tradeTypeId || null,
-        tradeType: userJson.TradesmanDetail?.tradeType || null,
-      })
+      toPublicUserProfile(user.toJSON(), ratingMap[user.id])
     );
   } catch (error) {
     console.error("Fetch User Error:", error);
@@ -1465,15 +1662,84 @@ exports.getFullUserProfile = async (req, res) => {
 //   }
 // };
 
+const NO_AVAILABILITY = {
+  availability: "unavailable",
+  hasActivePlan: false,
+  location: null,
+};
+
+/**
+ * Availability and a basic location summary for many tradesmen with ONE query.
+ *
+ * Derived from the travel-plan times (not the persisted status, which can lag):
+ * - "available_now": a plan is running right now
+ * - "upcoming": no running plan, but one starts later
+ * - "unavailable": no current or upcoming plan
+ *
+ * @param {number[]} tradesmanIds
+ * @param {Date} [now]
+ * @returns {Promise<Record<number, {availability: string, hasActivePlan: boolean, location: object|null}>>}
+ */
+const getAvailabilityByTradesman = async (tradesmanIds, now = new Date()) => {
+  const ids = [...new Set((tradesmanIds || []).map(Number).filter(Boolean))];
+  if (!ids.length) return {};
+
+  const plans = await TravelPlan.findAll({
+    where: {
+      tradesmanId: { [Op.in]: ids },
+      status: { [Op.in]: ACTIVE_TRAVEL_PLAN_STATUSES },
+      destinationDateTime: { [Op.gte]: now },
+    },
+    attributes: [
+      "id",
+      "tradesmanId",
+      "currentLocation",
+      "latitude",
+      "longitude",
+      "destination",
+      "destinationLatitude",
+      "destinationLongitude",
+      "startDateTime",
+      "destinationDateTime",
+    ],
+    order: [["startDateTime", "ASC"]],
+  });
+
+  const result = {};
+
+  for (const plan of plans) {
+    const tradesmanId = Number(plan.tradesmanId);
+    const running =
+      new Date(plan.startDateTime) <= now && new Date(plan.destinationDateTime) >= now;
+
+    // Plans are sorted by start time: keep a running plan, otherwise the soonest upcoming one.
+    if (result[tradesmanId] && (result[tradesmanId].availability === "available_now" || !running)) {
+      continue;
+    }
+
+    result[tradesmanId] = {
+      availability: running ? "available_now" : "upcoming",
+      hasActivePlan: true,
+      location: {
+        travelPlanId: plan.id,
+        current: plan.currentLocation,
+        latitude: plan.latitude,
+        longitude: plan.longitude,
+        destination: plan.destination,
+        destinationLatitude: plan.destinationLatitude,
+        destinationLongitude: plan.destinationLongitude,
+        startDateTime: plan.startDateTime,
+        destinationDateTime: plan.destinationDateTime,
+      },
+    };
+  }
+
+  return result;
+};
+
 exports.filterTradesmen = async (req, res) => {
   try {
-    console.log("🔥 FILTER TRADESMEN HIT 🔥");
-    console.log("🔍 Incoming filter request:", {
-      method: req.method,
-      query: req.query,
-      body: req.body,
-    });
-
+    // Request data (query/body, coordinates) is deliberately not logged.
     const input = parseFilterInput(req);
     const {
       tradeTypeId,
@@ -1485,6 +1751,7 @@ exports.filterTradesmen = async (req, res) => {
       startDate,
       endDate,
       rating,
+      radiusKm,
     } = input;
 
     const requestedLatitude =
@@ -1568,6 +1835,57 @@ exports.filterTradesmen = async (req, res) => {
       );
     }
 
+    // Optional search radius from the app; capped so a client cannot ask for "everywhere".
+    let effectiveRadiusKm = DEFAULT_FILTER_RADIUS_KM;
+    if (radiusKm !== undefined && radiusKm !== null && radiusKm !== "") {
+      const requestedRadius = Number(radiusKm);
+
+      if (!Number.isFinite(requestedRadius) || requestedRadius <= 0) {
+        return sendResponse(
+          res,
+          400,
+          false,
+          "radiusKm must be a number greater than 0",
+        );
+      }
+
+      effectiveRadiusKm = Math.min(requestedRadius, MAX_FILTER_RADIUS_KM);
+    }
+
+    // Optional pagination. Without `limit` every match is returned, as before.
+    let pageNumber = 1;
+    let pageLimit = null;
+
+    if (input.limit !== undefined && input.limit !== null && input.limit !== "") {
+      const requestedLimit = Number(input.limit);
+
+      if (!Number.isInteger(requestedLimit) || requestedLimit < 1) {
+        return sendResponse(
+          res,
+          400,
+          false,
+          `limit must be a whole number between 1 and ${MAX_FILTER_PAGE_SIZE}`,
+        );
+      }
+
+      pageLimit = Math.min(requestedLimit, MAX_FILTER_PAGE_SIZE);
+    }
+
+    if (input.page !== undefined && input.page !== null && input.page !== "") {
+      const requestedPage = Number(input.page);
+
+      if (!Number.isInteger(requestedPage) || requestedPage < 1) {
+        return sendResponse(
+          res,
+          400,
+          false,
+          "page must be a whole number greater than 0",
+        );
+      }
+
+      pageNumber = requestedPage;
+    }
+
     let normalizedTradeTypeIds = normalizeTradeTypeIds(tradeTypeIds);
     if (normalizedTradeTypeIds === null) {
       return sendResponse(
@@ -1643,7 +1961,7 @@ exports.filterTradesmen = async (req, res) => {
 
     if (!tradesmen.length) {
       return sendResponse(res, 200, true, "Filtered tradesmen", {
-        radiusKm: DEFAULT_FILTER_RADIUS_KM,
+        radiusKm: effectiveRadiusKm,
         appliedFilters: {
           tradeTypeIds: normalizedTradeTypeIds,
           latitude: requestedLatitude,
@@ -1653,6 +1971,18 @@ exports.filterTradesmen = async (req, res) => {
           rating: minimumRating,
         },
         count: 0,
+        total: 0,
+        ...(pageLimit === null
+          ? {}
+          : {
+              pagination: {
+                total: 0,
+                page: pageNumber,
+                limit: pageLimit,
+                totalPages: 1,
+                hasMore: false,
+              },
+            }),
         data: [],
       });
     }
@@ -1701,7 +2031,7 @@ exports.filterTradesmen = async (req, res) => {
           const travelPlans = Array.isArray(json.travelPlans) ? json.travelPlans : [];
 
           for (const travelPlan of travelPlans) {
-            const stopPoints = getStopPointsFromTravelPlan(travelPlan);
+            const stopPoints = getRoutePointsFromTravelPlan(travelPlan);
 
             for (const stop of stopPoints) {
               if (
@@ -1726,7 +2056,7 @@ exports.filterTradesmen = async (req, res) => {
                   ).toFixed(2),
                 );
 
-                if (distanceKm > DEFAULT_FILTER_RADIUS_KM) {
+                if (distanceKm > effectiveRadiusKm) {
                   continue;
                 }
               }
@@ -1754,12 +2084,10 @@ exports.filterTradesmen = async (req, res) => {
           }
         }
 
+        // Public profile only: never the raw user row (no email, mobile,
+        // password hash, licence or approval fields).
         return {
-          ...json,
-          tradeTypeId: json.TradesmanDetail?.tradeTypeId || null,
-          tradeType: json.TradesmanDetail?.tradeType || null,
-          avgRating: reviewSummary.avgRating,
-          reviewCount: reviewSummary.reviewCount,
+          ...toPublicUserProfile(json, reviewSummary),
           matchedStop: bestMatchedStop
             ? {
                 name: bestMatchedStop.name,
@@ -1774,10 +2102,37 @@ exports.filterTradesmen = async (req, res) => {
       })
       .filter(Boolean);
 
-    console.log(`✅ Tradesmen after filter pipeline: ${filteredTradesmen.length}`);
+    // Nearest first for a location search (newest first otherwise), so pages
+    // are in a stable, useful order.
+    if (requestedLatitude !== null && requestedLongitude !== null) {
+      filteredTradesmen.sort(
+        (a, b) =>
+          (a.matchedDistanceKm ?? Infinity) - (b.matchedDistanceKm ?? Infinity),
+      );
+    }
+
+    const total = filteredTradesmen.length;
+    const pageItems =
+      pageLimit === null
+        ? filteredTradesmen
+        : filteredTradesmen.slice(
+            (pageNumber - 1) * pageLimit,
+            pageNumber * pageLimit,
+          );
+
+    // Availability + a basic location summary for the returned page only, so
+    // the app needs no per-tradesman request.
+    const availabilityMap = await getAvailabilityByTradesman(
+      pageItems.map((tradesman) => tradesman.id)
+    );
+
+    const responseData = pageItems.map((tradesman) => ({
+      ...tradesman,
+      ...(availabilityMap[tradesman.id] || NO_AVAILABILITY),
+    }));
 
     return sendResponse(res, 200, true, "Filtered tradesmen", {
-      radiusKm: DEFAULT_FILTER_RADIUS_KM,
+      radiusKm: effectiveRadiusKm,
       appliedFilters: {
         tradeTypeIds: normalizedTradeTypeIds,
         latitude: requestedLatitude,
@@ -1786,8 +2141,20 @@ exports.filterTradesmen = async (req, res) => {
         endDate: normalizedEndDate,
         rating: minimumRating,
       },
-      count: filteredTradesmen.length,
-      data: filteredTradesmen,
+      count: responseData.length,
+      total,
+      ...(pageLimit === null
+        ? {}
+        : {
+            pagination: {
+              total,
+              page: pageNumber,
+              limit: pageLimit,
+              totalPages: Math.max(1, Math.ceil(total / pageLimit)),
+              hasMore: pageNumber * pageLimit < total,
+            },
+          }),
+      data: responseData,
     });
   } catch (err) {
     console.error("❌ Filter Error:", err);

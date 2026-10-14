@@ -221,17 +221,27 @@ exports.createTravelPlan = async (req, res) => {
       stops,
     } = req.body;
 
-    if (
-      !startLocation ||
-      !destination ||
-      !startDateTime ||
-      !destinationDateTime ||
-      latitude === undefined ||
-      longitude === undefined ||
-      destinationLatitude === undefined ||
-      destinationLongitude === undefined
-    ) {
-      return sendResponse(res, 400, false, "All required fields missing");
+    const missingFields = [
+      ["startLocation", !startLocation],
+      ["destination", !destination],
+      ["startDateTime", !startDateTime],
+      ["destinationDateTime", !destinationDateTime],
+      ["latitude", latitude === undefined],
+      ["longitude", longitude === undefined],
+      ["destinationLatitude", destinationLatitude === undefined],
+      ["destinationLongitude", destinationLongitude === undefined],
+    ]
+      .filter(([, isMissing]) => isMissing)
+      .map(([field]) => field);
+
+    if (missingFields.length) {
+      return sendResponse(
+        res,
+        400,
+        false,
+        `Required fields missing: ${missingFields.join(", ")}`,
+        { missingFields },
+      );
     }
 
     if (

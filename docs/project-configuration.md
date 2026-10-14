@@ -593,7 +593,7 @@ Required application environment values:
 | `APP_BASE_URL` | Public backend URL used for Stripe success/cancel URLs | `https://api.example.com` |
 | `FRONTEND_URL` | Public frontend URL used for password reset links | `https://app.example.com` |
 | `PORT` | Local Node server port | `5000` |
-| `SESSION_SECRET` | Express session secret | Secret value |
+| `SESSION_SECRET` | Express session secret. **Required**: the server refuses to start without it | Secret value |
 | `JWT_SECRET` | JWT signing secret | Secret value |
 
 Domain routes that must stay reachable:

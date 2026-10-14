@@ -9,6 +9,7 @@ process.env.CORS_ALLOWED_ORIGINS =
 process.env.FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 process.env.STRIPE_WEBHOOK_SECRET =
   process.env.STRIPE_WEBHOOK_SECRET || "whsec_test_secret";
+process.env.SESSION_SECRET = process.env.SESSION_SECRET || "test-session-secret";
 
 const app = require("../app");
 const Stripe = require("stripe");
@@ -431,8 +432,44 @@ test("admin registration requires admin token after bootstrap admin exists", asy
   assert.equal(response.status, 401);
 });
 
-test("user list responses do not expose password reset or hash fields", async () => {
-  const response = await request("GET", "/api/users");
+const FORBIDDEN_PUBLIC_USER_KEYS = [
+  "password",
+  "resetPasswordToken",
+  "resetPasswordExpires",
+  "email",
+  "mobile",
+  "googleId",
+  "provider",
+  "licenseNumber",
+  "licenseDocument",
+  "approvedBy",
+  "rejectionReason",
+];
+
+const assertNoForbiddenKeys = (value) => {
+  const serialized = JSON.stringify(value);
+
+  for (const key of FORBIDDEN_PUBLIC_USER_KEYS) {
+    assert.equal(
+      serialized.includes(`"${key}":`),
+      false,
+      `public user data must not contain "${key}"`
+    );
+  }
+};
+
+test("user directory endpoints require a login", async () => {
+  const list = await request("GET", "/api/users");
+  const clients = await request("GET", "/api/users/clients");
+
+  assert.equal(list.status, 401);
+  assert.equal(list.body.code, "TOKEN_MISSING");
+  assert.equal(clients.status, 401);
+});
+
+test("user list responses return only the public profile shape", async () => {
+  const clientLogin = await loginUser("client@test.com");
+  const response = await request("GET", "/api/users", { token: clientLogin.token });
 
   assert.equal(response.status, 200);
   const users = response.body.data.data;
@@ -440,10 +477,40 @@ test("user list responses do not expose password reset or hash fields", async ()
   assert.ok(users.length >= 2);
 
   for (const user of users) {
-    assert.equal(Object.hasOwn(user, "password"), false);
-    assert.equal(Object.hasOwn(user, "resetPasswordToken"), false);
-    assert.equal(Object.hasOwn(user, "resetPasswordExpires"), false);
+    assert.ok(Object.hasOwn(user, "id"));
+    assert.ok(Object.hasOwn(user, "name"));
   }
+
+  assertNoForbiddenKeys(response.body);
+});
+
+test("client list and public profile endpoints do not expose contact or licence details", async () => {
+  const clientLogin = await loginUser("client@test.com");
+  const tradesman = await User.findOne({ where: { email: "tradesman@test.com" } });
+  assert.ok(tradesman);
+
+  const clients = await request("GET", "/api/users/clients", { token: clientLogin.token });
+  assert.equal(clients.status, 200);
+  assertNoForbiddenKeys(clients.body);
+
+  const profile = await request("GET", `/api/users/${tradesman.id}`);
+  assert.equal(profile.status, 200);
+  assertNoForbiddenKeys(profile.body);
+
+  const tradesmen = await request("GET", "/api/users/tradesmen");
+  assert.ok([200, 404].includes(tradesmen.status));
+  assertNoForbiddenKeys(tradesmen.body);
+
+  // The filter response includes where tradesmen are, so it needs a login.
+  const anonymousFilter = await request("GET", "/api/users/tradesmen/filter");
+  assert.equal(anonymousFilter.status, 401);
+  assert.equal(anonymousFilter.body.code, "TOKEN_MISSING");
+
+  const filter = await request("GET", "/api/users/tradesmen/filter", {
+    token: clientLogin.token,
+  });
+  assert.equal(filter.status, 200);
+  assertNoForbiddenKeys(filter.body);
 });
 
 test("authenticated users cannot delete other user accounts", async () => {

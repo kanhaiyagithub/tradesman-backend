@@ -22,14 +22,16 @@ router.post(
 );
 
 router.post('/login', authRateLimiter, userController.login);
+router.post('/refresh-token', authRateLimiter, userController.refreshToken);
 
 // Lists
 router.get('/tradesmen', userController.getAllTradesmen);
-router.get('/clients', userController.getAllClients);
+router.get('/clients', verifyToken, userController.getAllClients);
 
 // ✅ FILTER ROUTE (supports GET + POST)
-router.get('/tradesmen/filter', userController.filterTradesmen);
-router.post('/tradesmen/filter', userController.filterTradesmen);
+// Requires a login: the response includes where tradesmen currently are.
+router.get('/tradesmen/filter', verifyToken, userController.filterTradesmen);
+router.post('/tradesmen/filter', verifyToken, userController.filterTradesmen);
 
 // Profiles
 router.get('/profile/:id', userController.getFullUserProfile);
@@ -58,7 +60,7 @@ router.put(
 );
 
 // Users
-router.get('/', userController.getAllUsers);
+router.get('/', verifyToken, userController.getAllUsers);
 router.get('/:id', userController.getUserById);
 router.delete('/:id', verifyToken, userController.deleteUser);
 

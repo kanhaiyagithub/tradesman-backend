@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const User = require("../models/User");
 const https = require("https");
 const metaConversionService = require("../services/metaConversionService");
+const { signRefreshToken } = require("../utils/authTokens");
 
 const fetchJson = (url) =>
   new Promise((resolve, reject) => {
@@ -194,6 +195,7 @@ exports.googleMobileLogin = async (req, res) => {
       message: "Google mobile login successful",
       data: {
         token: jwtToken,
+        refreshToken: signRefreshToken(user),
         user: {
           id: user.id,
           name: user.name,
