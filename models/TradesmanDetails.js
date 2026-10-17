@@ -111,6 +111,22 @@ const TradesmanDetails = sequelize.define(
       type: DataTypes.TEXT,
       allowNull: true,
     },
+
+    verificationStatus: {
+      type: DataTypes.ENUM("pending", "approved", "rejected", "resubmitted"),
+      allowNull: false,
+      defaultValue: "pending",
+    },
+
+    submittedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+
+    resubmittedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
   },
   {
     tableName: "TradesmanDetails",

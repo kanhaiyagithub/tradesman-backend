@@ -1,7 +1,13 @@
 const TradesmanDetails = require("../models/TradesmanDetails");
 const User = require("../models/User");
 const { Op } = require("sequelize");
+const sequelize = require("../config/db");
 const { sendPushNotification } = require("./notificationController");
+const { buildSubscribedExistsLiteral } = require("../services/subscriptionAccessService");
+const {
+  sendTradesmanApprovedEmail,
+  sendTradesmanRejectedEmail,
+} = require("../services/emailService");
 
 const send = (res, code, success, message, data = null) =>
   res.status(code).json({ success, message, data });
@@ -117,7 +123,24 @@ async function getPending(req, res) {
     const { page, limit, offset } = parsePagination(req);
     const { search, tradeType, tradeTypeId } = req.query;
 
-    const whereDetail = { isApproved: false };
+    const { status } = req.query;
+    const allowedStatuses = ["pending", "resubmitted", "rejected"];
+    if (status && !allowedStatuses.includes(status)) {
+      return send(res, 400, false, `status must be one of: ${allowedStatuses.join(", ")}`);
+    }
+
+    // Default queue = awaiting review (never reviewed + resubmitted).
+    const whereDetail = {
+      isApproved: false,
+      verificationStatus: status ? status : { [Op.in]: ["pending", "resubmitted"] },
+    };
+
+    // Admins only review tradesmen who have subscribed. Pass
+    // includeUnsubscribed=true to see everyone; the rejected list is never filtered.
+    const includeUnsubscribed = String(req.query.includeUnsubscribed).toLowerCase() === "true";
+    if (!includeUnsubscribed && status !== "rejected") {
+      whereDetail[Op.and] = [buildSubscribedExistsLiteral("`TradesmanDetails`.`userId`")];
+    }
     if (tradeTypeId) {
       const parsedTradeTypeId = Number(tradeTypeId);
       if (!Number.isInteger(parsedTradeTypeId) || parsedTradeTypeId <= 0) {
@@ -148,7 +171,13 @@ async function getPending(req, res) {
           required: true,
         },
       ],
-      order: [["createdAt", "DESC"]],
+      order: [
+        [
+          sequelize.literal("CASE WHEN `TradesmanDetails`.`verificationStatus` = 'resubmitted' THEN 0 ELSE 1 END"),
+          "ASC",
+        ],
+        ["createdAt", "DESC"],
+      ],
       limit,
       offset,
     });
@@ -177,6 +206,15 @@ async function approve(req, res) {
       return send(res, 400, false, "Tradesman is already approved");
     }
 
+    if (details.verificationStatus === "rejected") {
+      return send(
+        res,
+        400,
+        false,
+        "Tradesman was rejected and must resubmit their profile before it can be approved"
+      );
+    }
+
     const missingFields = validateApprovalReadiness(details);
     if (missingFields.length) {
       return send(res, 400, false, "Tradesman profile is incomplete", {
@@ -185,6 +223,7 @@ async function approve(req, res) {
     }
 
     details.isApproved = true;
+    details.verificationStatus = "approved";
     details.approvedBy = req.user.id;
     details.approvedAt = new Date();
     details.rejectionReason = null;
@@ -202,6 +241,9 @@ async function approve(req, res) {
       "Congratulations! Your tradesman profile has been approved. You can now start receiving hire requests.",
       { type: "PROFILE_APPROVED" }
     );
+
+    // Fire-and-forget: sendTradesmanApprovedEmail never throws or blocks the response.
+    sendTradesmanApprovedEmail({ user, businessName: details.businessName });
 
     return send(res, 200, true, "Tradesman approved", {
       user: sanitizeUser(user),
@@ -236,7 +278,12 @@ async function reject(req, res) {
       return send(res, 400, false, "Approved tradesmen cannot be rejected from this endpoint");
     }
 
+    if (details.verificationStatus === "rejected") {
+      return send(res, 400, false, "Tradesman is already rejected and awaiting resubmission");
+    }
+
     details.isApproved = false;
+    details.verificationStatus = "rejected";
     details.rejectionReason = reason;
     details.approvedBy = req.user.id;
     details.approvedAt = new Date();
@@ -254,6 +301,9 @@ async function reject(req, res) {
       `Your tradesman application was not approved. Reason: ${reason}`,
       { type: "PROFILE_REJECTED", reason }
     );
+
+    // Fire-and-forget: sendTradesmanRejectedEmail never throws or blocks the response.
+    sendTradesmanRejectedEmail({ user, reason, rejectedAt: details.approvedAt });
 
     return send(res, 200, true, "Tradesman rejected", {
       user: sanitizeUser(user),
@@ -282,4 +332,10 @@ async function getOne(req, res) {
   }
 }
 
-module.exports = { getPending, approve, reject, getOne };
+module.exports = {
+  getPending,
+  approve,
+  reject,
+  getOne,
+  validateApprovalReadiness,
+};

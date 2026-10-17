@@ -3,7 +3,7 @@ const router = express.Router();
 const adminAuth = require('../../controllers/AdminController/adminAuthController');
 const Admin = require('../../models/AdminModel/adminModel');
 const { verifyAdminToken } = require('../../middlewares/adminAuthMiddleware');
-const { authRateLimiter } = require('../../middlewares/rateLimitMiddleware');
+const { authRateLimiter, passwordResetRateLimiter } = require('../../middlewares/rateLimitMiddleware');
 
 const allowFirstAdminOrRequireAdmin = async (req, res, next) => {
   try {
@@ -22,5 +22,9 @@ const allowFirstAdminOrRequireAdmin = async (req, res, next) => {
 
 router.post('/register', authRateLimiter, allowFirstAdminOrRequireAdmin, adminAuth.registerAdmin);
 router.post('/login', authRateLimiter, adminAuth.login);   // <-- only this is correct
+router.post('/forgot-password', passwordResetRateLimiter, adminAuth.forgotPassword);
+router.post('/verify-otp', passwordResetRateLimiter, adminAuth.verifyResetOtp);
+router.post('/reset-password/:token', passwordResetRateLimiter, adminAuth.resetPassword);
+router.post('/change-password', authRateLimiter, verifyAdminToken, adminAuth.changePassword);
 
 module.exports = router;

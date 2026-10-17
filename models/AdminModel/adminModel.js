@@ -8,7 +8,8 @@ const Admin = sequelize.define('Admin', {
   },
   email: {
     type: DataTypes.STRING,
-    allowNull: false
+    allowNull: false,
+    unique: true,
   },
   password: {
     type: DataTypes.STRING,
@@ -17,6 +18,19 @@ const Admin = sequelize.define('Admin', {
   role: {
     type: DataTypes.ENUM('admin'),
     defaultValue: 'admin',
+  },
+  resetPasswordToken: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  resetPasswordExpires: {
+    type: DataTypes.DATE,
+    allowNull: true,
+  },
+  resetPasswordAttempts: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 0,
   },
 }, {
   timestamps: true,

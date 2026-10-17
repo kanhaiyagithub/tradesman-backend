@@ -14,6 +14,7 @@ process.env.SESSION_SECRET = process.env.SESSION_SECRET || "test-session-secret"
 const app = require("../app");
 const Stripe = require("stripe");
 const sequelize = require("../config/db");
+const Admin = require("../models/AdminModel/adminModel");
 const User = require("../models/User");
 const TradesmanDetails = require("../models/TradesmanDetails");
 const TradesType = require("../models/tradesTypeModel");
@@ -43,6 +44,7 @@ const uniqueSuffix = `${Date.now()}-${process.pid}`;
 let server;
 let baseUrl;
 let initialNotificationId = 0;
+let seededTestAdminId = null;
 const userLoginCache = new Map();
 const adminLoginCache = new Map();
 
@@ -200,6 +202,19 @@ const createAcceptedHire = async (jobDescription) => {
 
 test.before(async () => {
   await sequelize.authenticate();
+
+  // The admin tests log in as admin@test.com. Create it when the database does
+  // not have one, and remove it again afterwards, so a clean database works.
+  const existingTestAdmin = await Admin.findOne({ where: { email: "admin@test.com" } });
+  if (!existingTestAdmin) {
+    const seeded = await Admin.create({
+      name: "Test Admin",
+      email: "admin@test.com",
+      password: await bcrypt.hash(DEMO_PASSWORD, 10),
+    });
+    seededTestAdminId = seeded.id;
+  }
+
   const maxNotification = await Notification.max("id");
   initialNotificationId = Number(maxNotification || 0);
 
@@ -287,6 +302,10 @@ test.after(async () => {
         where: { id: conversationIds },
       });
     }
+  }
+
+  if (seededTestAdminId) {
+    await Admin.destroy({ where: { id: seededTestAdminId } });
   }
 
   await new Promise((resolve, reject) => {
@@ -432,6 +451,40 @@ test("admin registration requires admin token after bootstrap admin exists", asy
   assert.equal(response.status, 401);
 });
 
+test("admin registration validates input and rejects duplicate emails", async () => {
+  const adminLogin = await loginAdmin();
+  const register = (body) =>
+    request("POST", "/api/admin/register", { token: adminLogin.token, body });
+
+  const missingPassword = await register({
+    name: "No Password",
+    email: `no-password-${uniqueSuffix}@test.com`,
+  });
+  assert.equal(missingPassword.status, 400);
+
+  const shortPassword = await register({
+    name: "Short Password",
+    email: `short-password-${uniqueSuffix}@test.com`,
+    password: "short",
+  });
+  assert.equal(shortPassword.status, 400);
+
+  const badEmail = await register({
+    name: "Bad Email",
+    email: "not-an-email",
+    password: DEMO_PASSWORD,
+  });
+  assert.equal(badEmail.status, 400);
+
+  const duplicate = await register({
+    name: "Duplicate Admin",
+    email: adminLogin.admin.email.toUpperCase(),
+    password: DEMO_PASSWORD,
+  });
+  assert.equal(duplicate.status, 400);
+  assert.equal(duplicate.body.message, "Admin already exists");
+});
+
 const FORBIDDEN_PUBLIC_USER_KEYS = [
   "password",
   "resetPasswordToken",
@@ -553,7 +606,7 @@ test("admin pending tradesman search works with MySQL-compatible operators", asy
 
   const response = await request(
     "GET",
-    `/api/admin/tradesmen/pending?search=${encodeURIComponent("Approval Search")}`,
+    `/api/admin/tradesmen/pending?includeUnsubscribed=true&search=${encodeURIComponent("Approval Search")}`,
     { token: adminLogin.token }
   );
 

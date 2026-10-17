@@ -6,6 +6,12 @@ const Review = require("../models/reviewModel");
 const TravelPlan = require("../models/locationModel");
 const TradesType = require("../models/tradesTypeModel");
 const storageService = require("../services/storage/storageService");
+const UserSubscription = require("../models/UserSubscription");
+const { buildAccessibleSubscriptionWhere } = require("../services/subscriptionAccessService");
+const { validateApprovalReadiness } = require("./tradesmanApprovalController");
+const {
+  notifyAdminsTradesmanNeedsVerification,
+} = require("../services/adminNotificationService");
 const metaConversionService = require("../services/metaConversionService");
 const {
   passwordFingerprint,
@@ -655,6 +661,7 @@ exports.register = async (req, res) => {
         licenseNumber,
         licenseExpiry,
         licenseDocument: savedLicenseDocumentKey,
+        submittedAt: new Date(),
         portfolioPhotos,
         portfolioDescription,
       });
@@ -2333,10 +2340,184 @@ exports.updateTradesmanProfile = async (req, res) => {
         licenseNumber: tradesman.licenseNumber,
         licenseExpiry: tradesman.licenseExpiry,
         portfolioPhotos: toPublicPortfolioPhotos(tradesman.portfolioPhotos || []),
+        isApproved: tradesman.isApproved,
+        verificationStatus: tradesman.verificationStatus,
+        rejectionReason: tradesman.rejectionReason,
       },
     });
   } catch (error) {
     console.error("Update Tradesman Profile Error:", error);
+    return sendResponse(res, 500, false, "Server error");
+  }
+};
+
+exports.resubmitTradesmanVerification = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const user = await User.findByPk(userId);
+    if (!user) return sendResponse(res, 404, false, "User not found");
+    if (user.role !== "tradesman") {
+      return sendResponse(res, 403, false, "Only tradesmen can resubmit verification");
+    }
+
+    const tradesman = await TradesmanDetails.findOne({ where: { userId } });
+    if (!tradesman) return sendResponse(res, 404, false, "Tradesman details not found");
+
+    if (tradesman.verificationStatus !== "rejected") {
+      return sendResponse(
+        res,
+        400,
+        false,
+        "Only a rejected profile can be resubmitted for approval"
+      );
+    }
+
+    // Admins only review subscribed tradesmen, so a resubmission needs one too.
+    const subscription = await UserSubscription.findOne({
+      where: buildAccessibleSubscriptionWhere(userId),
+    });
+    if (!subscription) {
+      return sendResponse(
+        res,
+        403,
+        false,
+        "An active subscription is required to resubmit your profile for approval"
+      );
+    }
+
+    const {
+      tradeType,
+      tradeTypeId,
+      businessName,
+      shortBio,
+      licenseNumber,
+      licenseExpiry,
+      portfolioDescription,
+    } = req.body;
+
+    const licenseDocFile = req.files?.licenseDocument?.[0] || null;
+    const profileImageFile = req.files?.profileImage?.[0] || null;
+    const portfolioFiles = req.files?.portfolioPhotos || [];
+
+    if (tradeTypeId !== undefined) {
+      const tradeRecord = await TradesType.findOne({
+        where: { id: Number(tradeTypeId), isActive: true },
+      });
+      if (!tradeRecord) return sendResponse(res, 400, false, "Invalid tradeTypeId");
+      tradesman.tradeTypeId = Number(tradeTypeId);
+      tradesman.tradeType = tradeRecord.name;
+    } else if (tradeType !== undefined) {
+      tradesman.tradeType = tradeType;
+    }
+    if (businessName !== undefined) tradesman.businessName = businessName;
+    if (shortBio !== undefined) tradesman.shortBio = shortBio;
+    if (licenseNumber !== undefined) tradesman.licenseNumber = licenseNumber;
+    if (licenseExpiry !== undefined) tradesman.licenseExpiry = licenseExpiry;
+    if (portfolioDescription !== undefined) {
+      tradesman.portfolioDescription = portfolioDescription;
+    }
+
+    // Validate the merged profile before touching storage.
+    const missingFields = validateApprovalReadiness({
+      ...tradesman.toJSON(),
+      licenseDocument: licenseDocFile ? "pending-upload" : tradesman.licenseDocument,
+      portfolioPhotos:
+        portfolioFiles.length > 0 ? portfolioFiles : tradesman.portfolioPhotos,
+    });
+    if (missingFields.length) {
+      return sendResponse(res, 400, false, "Profile is incomplete", { missingFields });
+    }
+
+    const previousReason = tradesman.rejectionReason;
+
+    // Old files are only deleted AFTER the database save succeeds, and new
+    // uploads are removed again if it fails, so a failure never leaves the
+    // profile pointing at deleted files or leaks orphaned uploads.
+    const staleFiles = [];
+    const newFiles = [];
+
+    try {
+      if (licenseDocFile) {
+        const previousLicense = tradesman.licenseDocument;
+        tradesman.licenseDocument = await storageService.saveSingleImage({
+          file: licenseDocFile,
+          category: "license",
+        });
+        newFiles.push({ key: tradesman.licenseDocument, category: "license" });
+        if (previousLicense && previousLicense !== tradesman.licenseDocument) {
+          staleFiles.push({ key: previousLicense, category: "license" });
+        }
+      }
+
+      if (portfolioFiles.length > 0) {
+        const previousPhotos = Array.isArray(tradesman.portfolioPhotos)
+          ? [...tradesman.portfolioPhotos]
+          : [];
+        tradesman.portfolioPhotos = await storageService.saveMultipleImages({
+          files: portfolioFiles,
+          category: "portfolio",
+        });
+        for (const key of tradesman.portfolioPhotos) {
+          newFiles.push({ key, category: "portfolio" });
+        }
+        for (const key of previousPhotos) {
+          staleFiles.push({ key, category: "portfolio" });
+        }
+      }
+
+      if (profileImageFile) {
+        const previousImage = user.profileImage;
+        user.profileImage = await storageService.saveSingleImage({
+          file: profileImageFile,
+          category: "profile",
+        });
+        newFiles.push({ key: user.profileImage, category: "profile" });
+        if (previousImage && previousImage !== user.profileImage) {
+          staleFiles.push({ key: previousImage, category: "profile" });
+        }
+      }
+
+      tradesman.verificationStatus = "resubmitted";
+      tradesman.resubmittedAt = new Date();
+      tradesman.isApproved = false;
+      // rejectionReason is kept so the admin sees what was previously flagged.
+      await tradesman.save();
+
+      user.isVerified = false;
+      await user.save();
+    } catch (saveError) {
+      await Promise.all(
+        newFiles.map(({ key, category }) =>
+          storageService.deleteObject(key, { category }).catch(() => {})
+        )
+      );
+      throw saveError;
+    }
+
+    await Promise.all(
+      staleFiles.map(({ key, category }) =>
+        storageService.deleteObject(key, { category }).catch((deleteError) =>
+          console.error("Resubmit cleanup failed:", key, deleteError.message)
+        )
+      )
+    );
+
+    // Fire-and-forget; never throws.
+    notifyAdminsTradesmanNeedsVerification({
+      userId,
+      isResubmission: true,
+      previousReason,
+    });
+
+    return sendResponse(res, 200, true, "Profile resubmitted for approval", {
+      verificationStatus: tradesman.verificationStatus,
+      isApproved: tradesman.isApproved,
+      rejectionReason: tradesman.rejectionReason,
+      resubmittedAt: tradesman.resubmittedAt,
+    });
+  } catch (error) {
+    console.error("Resubmit Verification Error:", error);
     return sendResponse(res, 500, false, "Server error");
   }
 };

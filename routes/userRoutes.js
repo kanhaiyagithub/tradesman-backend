@@ -59,6 +59,17 @@ router.put(
   userController.updateTradesmanProfile
 );
 
+router.post(
+  "/profile/resubmit",
+  verifyToken,
+  upload.fields([
+    { name: "profileImage", maxCount: 1 },
+    { name: "licenseDocument", maxCount: 1 },
+    { name: "portfolioPhotos", maxCount: 10 },
+  ]),
+  userController.resubmitTradesmanVerification
+);
+
 // Users
 router.get('/', verifyToken, userController.getAllUsers);
 router.get('/:id', userController.getUserById);

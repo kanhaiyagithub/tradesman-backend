@@ -9,6 +9,7 @@ const StripeWebhookEvent = require("../models/StripeWebhookEvent");
 const metaConversionService = require("../services/metaConversionService");
 const { createAndSendNotification } = require("../services/notificationService");
 const User = require("../models/User");
+const { notifyAdminsTradesmanNeedsVerification } = require("../services/adminNotificationService");
 const { toMajorUnits } = require("../utils/metaCapi");
 const {
   sendSubscriptionWelcomeEmail,
@@ -164,6 +165,32 @@ const emailWelcomeForInvoice = async (invoice, stripeSubscriptionId) => {
     });
   } catch (error) {
     console.error("Welcome email error:", error.message);
+  }
+};
+
+/**
+ * Admin email: a tradesman has just subscribed (first invoice of a
+ * subscription, $0 trials included) and needs verifying. Safe to retry: the
+ * email log stops a second copy to the same admin.
+ */
+const emailAdminsForSubscribedTradesman = async (invoice, stripeSubscriptionId) => {
+  try {
+    if (invoice.billing_reason !== "subscription_create" || !stripeSubscriptionId) return;
+
+    const localSubscription = await findInvoiceLocalSubscription(invoice, stripeSubscriptionId);
+    const userId = localSubscription?.userId || getInvoiceMetadataUserId(invoice);
+    if (!userId) return;
+
+    const plan = localSubscription?.planId
+      ? await SubscriptionPlan.findByPk(localSubscription.planId)
+      : null;
+
+    await notifyAdminsTradesmanNeedsVerification({
+      userId,
+      planName: plan?.name || invoice.lines?.data?.[0]?.description || null,
+    });
+  } catch (error) {
+    console.error("Admin verification email error:", error.message);
   }
 };
 
@@ -449,6 +476,9 @@ exports.handleWebhook = async (req, res) => {
 
         // Thank-you email for the first paid invoice only (never renewals or $0 invoices).
         await emailWelcomeForInvoice(data, paidSubscriptionId);
+
+        // New tradesman registered + subscribed: tell admins to verify them.
+        await emailAdminsForSubscribedTradesman(data, paidSubscriptionId);
         break;
       }
 

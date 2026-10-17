@@ -1,4 +1,5 @@
 const { Op } = require("sequelize");
+const sequelize = require("../config/db");
 
 /**
  * Local-database subscription access rules (no Stripe call per request).
@@ -51,7 +52,31 @@ const hasSubscriptionAccess = (subscription, now = new Date()) => {
   return new Date(subscription.currentPeriodEnd).getTime() > getAccessCutoff(now).getTime();
 };
 
+/**
+ * Raw SQL EXISTS condition for list queries: "the user in `userIdColumn` has a
+ * subscription that currently grants access". Same rule as
+ * buildAccessibleSubscriptionWhere, but usable inside another query.
+ *
+ * @param {string} userIdColumn - Fully quoted column, e.g. "`TradesmanDetails`.`userId`".
+ * @param {Date} [now]
+ */
+const buildSubscribedExistsLiteral = (userIdColumn, now = new Date()) => {
+  const statuses = ACCESS_STATUSES.map((status) => sequelize.escape(status)).join(", ");
+  const cutoff = sequelize.escape(getAccessCutoff(now));
+
+  return sequelize.literal(
+    "EXISTS (SELECT 1 FROM `user_subscriptions` AS `us` WHERE `us`.`userId` = " +
+      userIdColumn +
+      " AND `us`.`status` IN (" +
+      statuses +
+      ") AND (`us`.`currentPeriodEnd` IS NULL OR `us`.`currentPeriodEnd` > " +
+      cutoff +
+      "))"
+  );
+};
+
 module.exports = {
+  buildSubscribedExistsLiteral,
   ACCESS_STATUSES,
   buildAccessibleSubscriptionWhere,
   hasSubscriptionAccess,
