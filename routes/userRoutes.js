@@ -4,6 +4,11 @@ const userController = require('../controllers/userController');
 const { verifyToken } = require('../middlewares/authMiddleware');
 const { upload, convertToJpg } = require('../middlewares/uploadMiddleware');
 const {
+  requireAccountPassword,
+  getAccountVerificationMethod,
+  sendAccountOtp,
+} = require('../middlewares/accountPasswordMiddleware');
+const {
   authRateLimiter,
   passwordResetRateLimiter,
 } = require('../middlewares/rateLimitMiddleware');
@@ -34,6 +39,9 @@ router.get('/tradesmen/filter', verifyToken, userController.filterTradesmen);
 router.post('/tradesmen/filter', verifyToken, userController.filterTradesmen);
 
 // Profiles
+router.get('/account-verification', verifyToken, getAccountVerificationMethod);
+router.post('/account-otp', verifyToken, authRateLimiter, sendAccountOtp);
+
 router.get('/profile/:id', userController.getFullUserProfile);
 router.get('/me', verifyToken, userController.getMeProfile);
 router.get('/clients/:clientId/profile', verifyToken, userController.getClientProfileForTradesman);
@@ -67,13 +75,20 @@ router.post(
     { name: "licenseDocument", maxCount: 1 },
     { name: "portfolioPhotos", maxCount: 10 },
   ]),
+  convertToJpg,
   userController.resubmitTradesmanVerification
 );
 
 // Users
 router.get('/', verifyToken, userController.getAllUsers);
 router.get('/:id', userController.getUserById);
-router.delete('/:id', verifyToken, userController.deleteUser);
+router.delete(
+  '/:id',
+  verifyToken,
+  authRateLimiter,
+  requireAccountPassword('DELETE', { onlyOwnAccountParam: 'id' }),
+  userController.deleteUser
+);
 
 // Password reset
 router.post('/forgot-password', passwordResetRateLimiter, userController.forgotPassword);

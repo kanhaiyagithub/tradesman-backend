@@ -6,6 +6,10 @@ const Review = require("../models/reviewModel");
 const TravelPlan = require("../models/locationModel");
 const TradesType = require("../models/tradesTypeModel");
 const storageService = require("../services/storage/storageService");
+const {
+  cancelUserStripeSubscriptions,
+  deleteUserFiles,
+} = require("../services/accountDeletionService");
 const UserSubscription = require("../models/UserSubscription");
 const { buildAccessibleSubscriptionWhere } = require("../services/subscriptionAccessService");
 const { validateApprovalReadiness } = require("./tradesmanApprovalController");
@@ -30,6 +34,7 @@ const MAX_FILTER_PAGE_SIZE = 100;
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Op, fn, col, literal } = require("sequelize");
+const sequelize = require("../config/db");
 const crypto = require("crypto");
 const transporter = require("../config/email");
 require("dotenv").config();
@@ -560,6 +565,22 @@ exports.register = async (req, res) => {
     const licenseDocFile = req.files?.licenseDocument?.[0] || null;
     const portfolioFiles = req.files?.portfolioPhotos || [];
 
+    // Public signup may only create clients or tradesmen (never admins).
+    if (!["tradesman", "client"].includes(role)) {
+      return sendResponse(res, 400, false, "role must be 'tradesman' or 'client'");
+    }
+    if (!name || !email || !mobile) {
+      return sendResponse(res, 400, false, "name, email and mobile are required");
+    }
+    if (typeof password !== "string" || password.length < 8) {
+      return sendResponse(res, 400, false, "Password must be at least 8 characters long");
+    }
+    // Lenient on formatting (spaces, +, dashes) but the number must be plausible.
+    const mobileDigits = String(mobile).replace(/\D/g, "");
+    if (mobileDigits.length < 7 || mobileDigits.length > 15) {
+      return sendResponse(res, 400, false, "Mobile number must contain 7 to 15 digits");
+    }
+
     // 1) Email already exist?
     const isExist = await User.findOne({ where: { email } });
     if (isExist) {
@@ -583,6 +604,9 @@ exports.register = async (req, res) => {
           false,
           "licenseNumber & licenseExpiry required for tradesman",
         );
+      }
+      if (Number.isNaN(new Date(licenseExpiry).getTime())) {
+        return sendResponse(res, 400, false, "licenseExpiry must be a valid date");
       }
       if (!profileImageFile) {
         return sendResponse(
@@ -626,59 +650,78 @@ exports.register = async (req, res) => {
       resolvedTradeType = tradeRecord.name;
     }
 
-    const savedProfileImageKey = await storageService.saveSingleImage({
-      file: profileImageFile,
-      category: "profile",
-    });
+    // 4) + 5) Create the user and tradesman profile atomically. Files are
+    // written first; if anything fails the transaction rolls back and the
+    // files are removed so no half-registered account or orphan upload remains.
+    const savedFiles = [];
+    let user;
+    try {
+      user = await sequelize.transaction(async (transaction) => {
+        const savedProfileImageKey = await storageService.saveSingleImage({
+          file: profileImageFile,
+          category: "profile",
+        });
+        if (savedProfileImageKey) {
+          savedFiles.push({ key: savedProfileImageKey, category: "profile" });
+        }
 
-    // 4) User create (profileImage = normalized storage key)
-    const user = await User.create({
-      name,
-      email,
-      mobile,
-      password: hashedPass,
-      role,
-      profileImage: savedProfileImageKey,
-    });
+        const createdUser = await User.create(
+          {
+            name,
+            email,
+            mobile,
+            password: hashedPass,
+            role,
+            profileImage: savedProfileImageKey,
+          },
+          { transaction },
+        );
 
-    // 5) TradesmanDetails create (licenseDocument + portfolioPhotos array)
-    if (role === "tradesman") {
-      const savedLicenseDocumentKey = await storageService.saveSingleImage({
-        file: licenseDocFile,
-        category: "license",
+        if (role === "tradesman") {
+          const savedLicenseDocumentKey = await storageService.saveSingleImage({
+            file: licenseDocFile,
+            category: "license",
+          });
+          savedFiles.push({ key: savedLicenseDocumentKey, category: "license" });
+
+          const portfolioPhotos = await storageService.saveMultipleImages({
+            files: portfolioFiles,
+            category: "portfolio",
+          });
+          portfolioPhotos.forEach((key) =>
+            savedFiles.push({ key, category: "portfolio" }),
+          );
+
+          await TradesmanDetails.create(
+            {
+              userId: createdUser.id,
+              tradeType: resolvedTradeType,
+              tradeTypeId: Number(tradeTypeId),
+              businessName,
+              shortBio,
+              licenseNumber,
+              licenseExpiry,
+              licenseDocument: savedLicenseDocumentKey,
+              submittedAt: new Date(),
+              portfolioPhotos,
+              portfolioDescription,
+            },
+            { transaction },
+          );
+        }
+
+        return createdUser;
       });
-      const portfolioPhotos = await storageService.saveMultipleImages({
-        files: portfolioFiles,
-        category: "portfolio",
-      });
-
-      await TradesmanDetails.create({
-        userId: user.id,
-        tradeType: resolvedTradeType,
-        tradeTypeId: Number(tradeTypeId),
-        businessName,
-        shortBio,
-        licenseNumber,
-        licenseExpiry,
-        licenseDocument: savedLicenseDocumentKey,
-        submittedAt: new Date(),
-        portfolioPhotos,
-        portfolioDescription,
-      });
-
-      // // 6) Default subscription: Free Trial
-      // const freePlan = await SubscriptionPlan.findOne({
-      //   where: { isDefault: true },
-      // });
-
-      // if (freePlan) {
-      //   await UserSubscription.create({
-      //     userId: user.id,
-      //     planId: freePlan.id,
-      //     startDate: new Date(),
-      //     status: "active",
-      //   });
-      // }
+    } catch (txError) {
+      await Promise.all(
+        savedFiles.map(({ key, category }) =>
+          storageService.deleteObject(key, { category }).catch(() => {}),
+        ),
+      );
+      if (txError?.name === "SequelizeUniqueConstraintError") {
+        return sendResponse(res, 400, false, "User already exists");
+      }
+      throw txError;
     }
 
     // Meta Conversions API: never throws and never blocks signup.
@@ -690,12 +733,21 @@ exports.register = async (req, res) => {
       userAgent: req.get("User-Agent"),
     });
 
+    const registered = serializeUserMedia(user.toJSON());
+
+    // Tradesmen go straight to the subscription step, so hand them a session
+    // (same tokens as /login) instead of making them sign in again.
+    if (role === "tradesman") {
+      registered.token = signToken(user);
+      registered.refreshToken = signRefreshToken(user);
+    }
+
     return sendResponse(
       res,
       201,
       true,
       "User registered successfully",
-      serializeUserMedia(user.toJSON())
+      registered
     );
   } catch (error) {
     console.error("Register Error:", error);
@@ -1156,6 +1208,21 @@ exports.deleteUser = async (req, res) => {
 
     if (!user) return sendResponse(res, 404, false, "User not found");
 
+    // Stop billing first. If Stripe fails, keep the account so nobody is
+    // charged for an account they can no longer open.
+    try {
+      await cancelUserStripeSubscriptions(user.id);
+    } catch (stripeError) {
+      console.error("Delete account: Stripe cancel failed:", stripeError.message);
+      return sendResponse(
+        res,
+        502,
+        false,
+        "Could not cancel your subscription, so the account was not deleted. Please try again."
+      );
+    }
+
+    await deleteUserFiles(user);
     await user.destroy();
     return sendResponse(res, 200, true, "User deleted successfully");
   } catch (error) {
