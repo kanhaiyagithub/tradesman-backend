@@ -2,6 +2,7 @@ const Admin = require("../models/AdminModel/adminModel");
 const User = require("../models/User");
 const TradesmanDetails = require("../models/TradesmanDetails");
 const { sendAdminTradesmanVerificationEmail } = require("./emailService");
+const { publishApprovalsUpdate } = require("./adminEventService");
 
 const getReviewUrl = (tradesmanId) => {
   const base = String(process.env.ADMIN_PANEL_URL || "").trim().replace(/\/+$/, "");
@@ -36,6 +37,16 @@ const notifyAdminsTradesmanNeedsVerification = async ({
     if (!isResubmission && details.verificationStatus !== "pending") {
       return { notified: 0, reason: "NOT_PENDING" };
     }
+
+    // Live dashboard alert first, so a slow or failing email never delays it.
+    await publishApprovalsUpdate({
+      type: isResubmission ? "resubmitted" : "new",
+      tradesman: {
+        userId: tradesman.id,
+        name: tradesman.name,
+        businessName: details.businessName,
+      },
+    });
 
     const admins = await Admin.findAll();
     let notified = 0;

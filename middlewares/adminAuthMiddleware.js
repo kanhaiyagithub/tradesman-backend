@@ -28,3 +28,14 @@ exports.verifyAdminToken = async (req, res, next) => {
     return res.status(401).json({ message: "Unauthorized" });
   }
 };
+
+/** Use after verifyAdminToken: only the (single) super admin may continue. */
+exports.requireSuperAdmin = (req, res, next) => {
+  if (req.user?.role !== "super_admin") {
+    return res.status(403).json({
+      success: false,
+      message: "Only the super admin can do this",
+    });
+  }
+  return next();
+};

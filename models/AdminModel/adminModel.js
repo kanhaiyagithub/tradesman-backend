@@ -16,7 +16,8 @@ const Admin = sequelize.define('Admin', {
     allowNull: false,
   },
   role: {
-    type: DataTypes.ENUM('admin'),
+    // Exactly one admin is 'super_admin' (enforced by a unique generated column, see migration 0016).
+    type: DataTypes.ENUM('admin', 'super_admin'),
     defaultValue: 'admin',
   },
   resetPasswordToken: {

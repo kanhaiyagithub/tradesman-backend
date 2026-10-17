@@ -28,6 +28,7 @@ const Message = require("../models/messageModel");
 const Conversation = require("../models/conversationModel");
 const ConversationParticipant = require("../models/conversationParticipantModel");
 const chatService = require("../services/chatService");
+const { transferSuperAdmin } = require("../services/superAdminService");
 const {
   getCandidateLiveMatches,
 } = require("../services/liveLocationService");
@@ -451,38 +452,63 @@ test("admin registration requires admin token after bootstrap admin exists", asy
   assert.equal(response.status, 401);
 });
 
-test("admin registration validates input and rejects duplicate emails", async () => {
+test("admin registration is super-admin only, validates input and rejects duplicate emails", async () => {
   const adminLogin = await loginAdmin();
+  // The acting admin always confirms with their own password (`adminPassword`).
   const register = (body) =>
-    request("POST", "/api/admin/register", { token: adminLogin.token, body });
+    request("POST", "/api/admin/register", {
+      token: adminLogin.token,
+      body: { adminPassword: DEMO_PASSWORD, ...body },
+    });
 
-  const missingPassword = await register({
-    name: "No Password",
-    email: `no-password-${uniqueSuffix}@test.com`,
-  });
-  assert.equal(missingPassword.status, 400);
+  // A regular admin cannot create admins (validation never even runs).
+  const regularAdmin = await Admin.findByPk(adminLogin.admin.id);
+  if (regularAdmin.role !== "super_admin") {
+    const denied = await register({
+      name: "Not Allowed",
+      email: `not-allowed-${uniqueSuffix}@test.com`,
+      password: DEMO_PASSWORD,
+    });
+    assert.equal(denied.status, 403);
+  }
 
-  const shortPassword = await register({
-    name: "Short Password",
-    email: `short-password-${uniqueSuffix}@test.com`,
-    password: "short",
-  });
-  assert.equal(shortPassword.status, 400);
+  // Make the login admin the super admin for the rest of this test, then give the role back.
+  const previousSuper = await Admin.findOne({ where: { role: "super_admin" } });
+  await transferSuperAdmin({ targetId: adminLogin.admin.id });
 
-  const badEmail = await register({
-    name: "Bad Email",
-    email: "not-an-email",
-    password: DEMO_PASSWORD,
-  });
-  assert.equal(badEmail.status, 400);
+  try {
+    const missingPassword = await register({
+      name: "No Password",
+      email: `no-password-${uniqueSuffix}@test.com`,
+    });
+    assert.equal(missingPassword.status, 400);
 
-  const duplicate = await register({
-    name: "Duplicate Admin",
-    email: adminLogin.admin.email.toUpperCase(),
-    password: DEMO_PASSWORD,
-  });
-  assert.equal(duplicate.status, 400);
-  assert.equal(duplicate.body.message, "Admin already exists");
+    const shortPassword = await register({
+      name: "Short Password",
+      email: `short-password-${uniqueSuffix}@test.com`,
+      password: "short",
+    });
+    assert.equal(shortPassword.status, 400);
+
+    const badEmail = await register({
+      name: "Bad Email",
+      email: "not-an-email",
+      password: DEMO_PASSWORD,
+    });
+    assert.equal(badEmail.status, 400);
+
+    const duplicate = await register({
+      name: "Duplicate Admin",
+      email: adminLogin.admin.email.toUpperCase(),
+      password: DEMO_PASSWORD,
+    });
+    assert.equal(duplicate.status, 400);
+    assert.equal(duplicate.body.message, "Admin already exists");
+  } finally {
+    if (previousSuper && previousSuper.id !== adminLogin.admin.id) {
+      await transferSuperAdmin({ targetId: previousSuper.id });
+    }
+  }
 });
 
 const FORBIDDEN_PUBLIC_USER_KEYS = [

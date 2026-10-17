@@ -1,8 +1,11 @@
 const jwt = require("jsonwebtoken");
+const Admin = require("./models/AdminModel/adminModel");
 const { processLiveLocation } = require("./services/liveLocationService");
 const chatService = require("./services/chatService");
 const { isOriginAllowed } = require("./utils/securityConfig");
 const { parseLiveCoordinates } = require("./utils/liveLocationValidation");
+
+const ADMIN_ROOM = "admins";
 
 let io = null;
 
@@ -85,7 +88,7 @@ module.exports = {
       },
     });
 
-    io.use((socket, next) => {
+    io.use(async (socket, next) => {
       try {
         const token =
           socket.handshake.headers?.authorization?.replace("Bearer ", "") ||
@@ -102,6 +105,14 @@ module.exports = {
           return next(new Error("Unauthorized"));
         }
 
+        // Admin tokens share the JWT secret but their ids are Admin ids, not User ids.
+        // They must never be treated as a user (chat, live location, online map).
+        if (decoded.role === "admin") {
+          const admin = await Admin.findByPk(decoded.id);
+          if (!admin) return next(new Error("Unauthorized"));
+          socket.isAdmin = true;
+        }
+
         socket.user = decoded;
         next();
       } catch (error) {
@@ -111,6 +122,13 @@ module.exports = {
     });
 
     io.on("connection", (socket) => {
+      // Admin dashboards only listen on the "admins" room; none of the user handlers apply.
+      if (socket.isAdmin) {
+        socket.join(ADMIN_ROOM);
+        socket.emit("admin:ready");
+        return;
+      }
+
       const resolvedUserId = String(socket.user?.id || "").trim();
 
       console.log("🟢 Socket connected:", {

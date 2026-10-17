@@ -4,6 +4,13 @@ const router = express.Router();
 const { verifyAdminToken } = require("../../middlewares/adminAuthMiddleware");
 const tradesmanApprovalController = require("../../controllers/tradesmanApprovalController");
 
+/* Size of the review queue (must stay above /tradesmen/:userId) */
+router.get(
+  "/tradesmen/pending-count",
+  verifyAdminToken,
+  tradesmanApprovalController.getPendingCount
+);
+
 /* Pending tradesmen */
 router.get(
   "/tradesmen/pending",

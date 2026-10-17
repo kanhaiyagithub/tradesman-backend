@@ -4,6 +4,8 @@ const { Op } = require("sequelize");
 const sequelize = require("../config/db");
 const { sendPushNotification } = require("./notificationController");
 const { buildSubscribedExistsLiteral } = require("../services/subscriptionAccessService");
+const { countAwaitingReview } = require("../services/pendingApprovalsService");
+const { publishApprovalsUpdate } = require("../services/adminEventService");
 const {
   sendTradesmanApprovedEmail,
   sendTradesmanRejectedEmail,
@@ -245,6 +247,9 @@ async function approve(req, res) {
     // Fire-and-forget: sendTradesmanApprovedEmail never throws or blocks the response.
     sendTradesmanApprovedEmail({ user, businessName: details.businessName });
 
+    // Keep other admins' queue badge in sync (never throws).
+    publishApprovalsUpdate({ type: "decided" });
+
     return send(res, 200, true, "Tradesman approved", {
       user: sanitizeUser(user),
       details: serializeDetails(details),
@@ -305,6 +310,9 @@ async function reject(req, res) {
     // Fire-and-forget: sendTradesmanRejectedEmail never throws or blocks the response.
     sendTradesmanRejectedEmail({ user, reason, rejectedAt: details.approvedAt });
 
+    // Keep other admins' queue badge in sync (never throws).
+    publishApprovalsUpdate({ type: "decided" });
+
     return send(res, 200, true, "Tradesman rejected", {
       user: sanitizeUser(user),
       details: serializeDetails(details),
@@ -332,7 +340,26 @@ async function getOne(req, res) {
   }
 }
 
+/**
+ * GET /api/admin/tradesmen/pending-count
+ * Cheap size of the review queue, for the dashboard badge.
+ */
+async function getPendingCount(req, res) {
+  try {
+    const { total, pending, resubmitted } = await countAwaitingReview();
+    return send(res, 200, true, "Pending count fetched", {
+      count: total,
+      pending,
+      resubmitted,
+    });
+  } catch (err) {
+    console.error(err);
+    return send(res, 500, false, "Server error");
+  }
+}
+
 module.exports = {
+  getPendingCount,
   getPending,
   approve,
   reject,

@@ -23,8 +23,10 @@ const clearResetState = {
 };
 
 const signToken =(admin) => {
+    // The claim only says "this is an admin token". Super-admin status is read from the
+    // database on every request (verifyAdminToken), so it can change without re-login.
     return jwt.sign(
-        { id: admin.id, role: admin.role },
+        { id: admin.id, role: 'admin' },
         process.env.JWT_SECRET,
         { expiresIn: '7d' }
     );
@@ -47,11 +49,22 @@ const bootstrapFirstAdmin = async (req, res) => {
     const displayName =
         typeof name === 'string' && name.trim() ? name.trim() : normalizedEmail.split('@')[0];
 
-    const admin = await Admin.create({
-        name: displayName,
-        email: normalizedEmail,
-        password: await bcrypt.hash(password, 10),
-    });
+    // The very first admin is the super admin. If two first logins race, the database's
+    // single-super-admin unique index rejects the second one.
+    let admin;
+    try {
+        admin = await Admin.create({
+            name: displayName,
+            email: normalizedEmail,
+            password: await bcrypt.hash(password, 10),
+            role: 'super_admin',
+        });
+    } catch (error) {
+        if (error.name === 'SequelizeUniqueConstraintError') {
+            return res.status(400).json({ success: false, message: 'Invalid credentials' });
+        }
+        throw error;
+    }
 
     // Two simultaneous first logins with different emails could both pass the
     // empty-table check; only the earliest-created admin survives.
@@ -98,7 +111,20 @@ exports.login = async (req, res) => {
 
 exports.registerAdmin = async (req, res) => {
     try {
-        const { name, email, password } = req.body || {};
+        const { name, email, password, adminPassword } = req.body || {};
+
+        // A signed-in super admin must confirm with their OWN password (`adminPassword`; not the
+        // new admin's `password`). Skipped only for the very first admin, who has no one to confirm.
+        // Wrong or missing is a 400, not 401, so the dashboard does not treat it as an expired session.
+        if (req.user) {
+            if (typeof adminPassword !== 'string' || !adminPassword) {
+                return res.status(400).json({ message: 'Your password is required to add an admin' });
+            }
+            const actingAdmin = await Admin.findByPk(req.user.id);
+            if (!actingAdmin || !(await bcrypt.compare(adminPassword, actingAdmin.password))) {
+                return res.status(400).json({ message: 'Incorrect password' });
+            }
+        }
 
         if (typeof name !== 'string' || !name.trim()) {
             return res.status(400).json({ message: 'Name is required' });
@@ -120,10 +146,14 @@ exports.registerAdmin = async (req, res) => {
         }
 
         const hashed = await bcrypt.hash(password, 10);
+        // Only the super admin can reach this route (see adminRoutes), except when no admin
+        // exists yet: then the account being created is the first, and becomes super admin.
+        const isFirstAdmin = (await Admin.count()) === 0;
         const admin = await Admin.create({
             name: name.trim(),
             email: normalizedEmail,
             password: hashed,
+            role: isFirstAdmin ? 'super_admin' : 'admin',
         });
 
         res.status(201).json({
