@@ -22,13 +22,17 @@ const clearResetState = {
     resetPasswordAttempts: 0,
 };
 
+// Admin sessions are short: there is no refresh token, so after this long the admin signs in again.
+// (Deleting an admin still cuts their access immediately; this only limits a stolen token.)
+const ADMIN_TOKEN_TTL = '1d';
+
 const signToken =(admin) => {
     // The claim only says "this is an admin token". Super-admin status is read from the
     // database on every request (verifyAdminToken), so it can change without re-login.
     return jwt.sign(
         { id: admin.id, role: 'admin' },
         process.env.JWT_SECRET,
-        { expiresIn: '7d' }
+        { expiresIn: ADMIN_TOKEN_TTL }
     );
 };
 
@@ -101,7 +105,7 @@ exports.login = async (req, res) => {
       const isMatch = await bcrypt.compare(password, admin.password);
       if (!isMatch) return res.status(400).json({ success:false, message:'Invalid credentials' });
 
-      const token = jwt.sign({ id: admin.id, role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '7d' });
+      const token = signToken(admin);
       return res.json({ success:true, data:{ token, admin: { id: admin.id, name: admin.name, email: admin.email } } });
     } catch (err) {
       console.error(err);

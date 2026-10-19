@@ -1,6 +1,11 @@
+const fs = require("fs");
+const path = require("path");
 const TradesmanDetails = require("../models/TradesmanDetails");
 const User = require("../models/User");
 const { Op } = require("sequelize");
+const storageConfig = require("../config/storage");
+const storageService = require("../services/storage/storageService");
+const { resolveLicenseFiles } = require("../middlewares/privateUploads");
 const sequelize = require("../config/db");
 const { sendPushNotification } = require("./notificationController");
 const { buildSubscribedExistsLiteral } = require("../services/subscriptionAccessService");
@@ -340,6 +345,68 @@ async function getOne(req, res) {
   }
 }
 
+// Types that are safe to show inline. Anything else is sent as a download, so an uploaded
+// .html/.svg can never run in the browser from this endpoint.
+const LICENSE_CONTENT_TYPES = {
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".jfif": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".pdf": "application/pdf",
+};
+
+/**
+ * GET /api/admin/tradesmen/:userId/license
+ * Streams the tradesman's licence document to an authenticated admin. Licence files are no
+ * longer served by URL (see middlewares/privateUploads.js), so this is the only way to read them.
+ */
+async function getLicense(req, res) {
+  try {
+    const userId = parseUserId(req.params.userId);
+    if (!userId) return send(res, 400, false, "userId must be a positive integer");
+
+    const details = await getTradesmanDetailsForAdmin(userId);
+    const notFound = () => send(res, 404, false, "Licence document not found");
+    if (!details || !details.licenseDocument) return notFound();
+
+    const key = storageService.normalizeStorageKey(details.licenseDocument, { category: "license" });
+    let absolutePath = null;
+    for (const candidate of resolveLicenseFiles(storageConfig.local.rootDir, key)) {
+      try {
+        if ((await fs.promises.stat(candidate)).isFile()) {
+          absolutePath = candidate;
+          break;
+        }
+      } catch {
+        // not here, try the next allowed location
+      }
+    }
+    if (!absolutePath) return notFound();
+
+    const contentType = LICENSE_CONTENT_TYPES[path.extname(absolutePath).toLowerCase()];
+    return res.sendFile(
+      absolutePath,
+      {
+        headers: {
+          "Content-Type": contentType || "application/octet-stream",
+          "Content-Disposition": contentType ? "inline" : "attachment",
+          // Personal data: never cache, and never let the file run anything if it is opened directly.
+          "Cache-Control": "private, no-store",
+          "Content-Security-Policy": "default-src 'none'; sandbox",
+        },
+      },
+      (error) => {
+        if (error && !res.headersSent) send(res, 404, false, "Licence document not found");
+      }
+    );
+  } catch (err) {
+    console.error(err);
+    return send(res, 500, false, "Server error");
+  }
+}
+
 /**
  * GET /api/admin/tradesmen/pending-count
  * Cheap size of the review queue, for the dashboard badge.
@@ -359,6 +426,7 @@ async function getPendingCount(req, res) {
 }
 
 module.exports = {
+  getLicense,
   getPendingCount,
   getPending,
   approve,

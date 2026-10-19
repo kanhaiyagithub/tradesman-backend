@@ -5,6 +5,7 @@ const session = require('express-session');
 const passport = require('passport');
 const storageConfig = require('./config/storage');
 const { isOriginAllowed } = require('./utils/securityConfig');
+const { blockPrivateUploads } = require('./middlewares/privateUploads');
 
 // dotenv.config({ path: './config/config.env' });
 dotenv.config();
@@ -39,6 +40,14 @@ const matchRoutes = require('./routes/matchRoutes');
 const metaRoutes = require('./routes/metaRoutes');
 
 const app = express();
+
+// Do not advertise the framework, and stop browsers guessing a different content type
+// for API responses and uploaded files.
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+});
 
 if (process.env.TRUST_PROXY === 'true') {
   // Trust first proxy when behind a reverse proxy (nginx, ALB, etc.).
@@ -78,8 +87,11 @@ app.use(express.json());
  * Phase 1A does not change file storage behavior. It only removes runtime
  * schema mutation from app startup.
  */
+// Licence documents are personal data: never served by URL. Admins read them through
+// GET /api/admin/tradesmen/:userId/license (authenticated). Photos below stay public.
 app.use(
   storageConfig.local.publicBasePath,
+  blockPrivateUploads,
   express.static(storageConfig.local.rootDir)
 );
 

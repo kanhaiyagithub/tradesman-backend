@@ -32,6 +32,13 @@ router.post(
   tradesmanApprovalController.reject
 );
 
+/* Licence document (authenticated; files are not served by URL) */
+router.get(
+  "/tradesmen/:userId/license",
+  verifyAdminToken,
+  tradesmanApprovalController.getLicense
+);
+
 /* Single tradesman */
 router.get(
   "/tradesmen/:userId",
