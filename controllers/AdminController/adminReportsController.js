@@ -13,12 +13,13 @@ const {
  * Both reports and both CSV exports take the same filters:
  *   users:         search (name/email), role (client|tradesman), verified (true|false)
  *   subscriptions: search (user name/email, plan name), planId, status
+ *   both:          dummy = exclude (default: real users only) | include | only (test users)
  * The JSON reports also take page/limit (limit 1..100). Without page/limit they return every
  * matching row, as before; with them they return { data, meta: { total, page, perPage } }.
  * The CSV exports ignore paging and export everything that matches the filters.
  */
 
-const USER_ATTRIBUTES = ["id", "name", "email", "role", "isVerified", "createdAt"];
+const USER_ATTRIBUTES = ["id", "name", "email", "role", "isVerified", "createdAt", "isDummy"];
 const USER_ORDER = [["createdAt", "DESC"], ["id", "DESC"]];
 
 // No Stripe ids here: the dashboard does not need them.
@@ -28,12 +29,12 @@ const SUBSCRIPTION_ATTRIBUTES = [
 ];
 const SUBSCRIPTION_ORDER = [["createdAt", "DESC"], ["id", "DESC"]];
 const subscriptionInclude = () => [
-  { model: User, as: "user", attributes: ["name", "email"], required: false },
+  { model: User, as: "user", attributes: ["name", "email", "isDummy"], required: false },
   { model: SubscriptionPlan, as: "plan", attributes: ["name", "priceMonthly"], required: false },
 ];
 
 const USER_CSV_FIELDS = USER_ATTRIBUTES;
-const SUBSCRIPTION_CSV_FIELDS = ["user", "email", "plan", "price", "status", "currentPeriodEnd"];
+const SUBSCRIPTION_CSV_FIELDS = ["user", "email", "plan", "price", "status", "currentPeriodEnd", "isDummy"];
 
 const badRequest = (res, message) => res.status(400).json({ success: false, message });
 
@@ -152,6 +153,7 @@ const exportSubscriptionsCSV = async (req, res) => {
       price: s.plan?.priceMonthly || 0,
       status: s.status,
       currentPeriodEnd: s.currentPeriodEnd ? new Date(s.currentPeriodEnd).toISOString() : "",
+      isDummy: Boolean(s.user?.isDummy),
     }));
     return sendCsv(res, "subscriptions.csv", SUBSCRIPTION_CSV_FIELDS, data);
   } catch (err) {

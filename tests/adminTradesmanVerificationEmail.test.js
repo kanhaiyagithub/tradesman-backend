@@ -64,6 +64,7 @@ const makeUser = async ({ role = "tradesman", approved = false, label }) => {
     role,
     provider: "manual",
     isVerified: true,
+    profileImage: "profile.jpg",
   });
   created.users.push(user.id);
 

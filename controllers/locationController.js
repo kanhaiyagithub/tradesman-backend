@@ -12,6 +12,7 @@ const { Op, fn, col } = require("sequelize");
 const storageService = require("../services/storage/storageService");
 
 const { matchTravelPlanWithAlerts } = require("../services/travelAlertService");
+const { getRequesterWorld, worldWhere } = require("../services/dummyWorld");
 const {
   buildAccessibleSubscriptionWhere,
 } = require("../services/subscriptionAccessService");
@@ -718,8 +719,9 @@ exports.getTradesmanProfile = async (req, res) => {
   try {
     const { tradesmanId } = req.params;
 
+    // A tradesman from the other world (test vs real) is "not found".
     const tradesman = await User.findOne({
-      where: { id: tradesmanId, role: "tradesman" },
+      where: { id: tradesmanId, role: "tradesman", ...worldWhere(await getRequesterWorld(req)) },
 
       attributes: ["id", "name", "profileImage"],
     });

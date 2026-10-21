@@ -10,6 +10,7 @@ const metaConversionService = require("../services/metaConversionService");
 const { createAndSendNotification } = require("../services/notificationService");
 const User = require("../models/User");
 const { notifyAdminsTradesmanNeedsVerification } = require("../services/adminNotificationService");
+const { handleTradesmanSubscribed } = require("../services/subscriptionApprovalService");
 const { toMajorUnits } = require("../utils/metaCapi");
 const {
   sendSubscriptionWelcomeEmail,
@@ -194,6 +195,21 @@ const emailAdminsForSubscribedTradesman = async (invoice, stripeSubscriptionId) 
   }
 };
 
+/**
+ * A tradesperson in an unlicensed trade has nothing for an admin to check, so they go live as soon as they pay.
+ * Called whenever subscription state is saved and when an invoice is paid; safe to repeat, never throws.
+ */
+const autoApproveSubscriber = (userId) => handleTradesmanSubscribed(userId);
+
+const autoApproveForInvoice = async (invoice, stripeSubscriptionId) => {
+  try {
+    const localSubscription = await findInvoiceLocalSubscription(invoice, stripeSubscriptionId);
+    await autoApproveSubscriber(localSubscription?.userId || getInvoiceMetadataUserId(invoice));
+  } catch (error) {
+    console.error("Auto-approval (invoice) error:", error.message);
+  }
+};
+
 /** Payment-failed email: not for the first payment (the app shows that at checkout). */
 const emailPaymentFailedForInvoice = async (invoice, stripeSubscriptionId) => {
   try {
@@ -352,6 +368,10 @@ const syncSubscriptionFromStripe = async (stripeSubscription) => {
   }
 
   await localSubscription.save();
+
+  // Every webhook and the daily re-sync end up here, so this one hook is what approves a paying tradesperson
+  // in an unlicensed trade (and what repairs it if an earlier event was missed).
+  await autoApproveSubscriber(localSubscription.userId);
 };
 
 exports.handleWebhook = async (req, res) => {
@@ -476,6 +496,9 @@ exports.handleWebhook = async (req, res) => {
 
         // Thank-you email for the first paid invoice only (never renewals or $0 invoices).
         await emailWelcomeForInvoice(data, paidSubscriptionId);
+
+        // Unlicensed trade: approved now that they pay. (Admins are only told about licence-required trades.)
+        await autoApproveForInvoice(data, paidSubscriptionId);
 
         // New tradesman registered + subscribed: tell admins to verify them.
         await emailAdminsForSubscribedTradesman(data, paidSubscriptionId);

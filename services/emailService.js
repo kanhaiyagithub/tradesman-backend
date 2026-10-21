@@ -1,5 +1,6 @@
 const nodemailer = require("nodemailer");
 const EmailNotificationLog = require("../models/EmailNotificationLog");
+const { isUndeliverableAddress } = require("../utils/emailAddress");
 
 function getSmtpPassword() {
   return (process.env.SMTP_PASS || "").replace(/\s+/g, "");
@@ -100,6 +101,12 @@ const sendMail = async ({ to, subject, html, text }) => {
     return { success: false, reason: "EMAIL_RECIPIENT_MISSING" };
   }
 
+  // Test accounts use reserved domains (example.test, example.com, ...) that can never receive
+  // mail, so skip them quietly instead of generating bounces.
+  if (isUndeliverableAddress(to)) {
+    return { success: false, skipped: true, reason: "UNDELIVERABLE_TEST_ADDRESS" };
+  }
+
   if (!isEmailConfigured()) {
     console.log("[EMAIL] SMTP is not fully configured, skipping email", {
       to,
@@ -174,6 +181,12 @@ async function sendLoggedEmail({
       recipientUserId,
     });
     return { success: false, reason: "EMAIL_RECIPIENT_MISSING" };
+  }
+
+  // Never logged as "failed": a failed log could be retried again and again for an address
+  // that can never receive mail.
+  if (isUndeliverableAddress(to)) {
+    return { success: false, skipped: true, reason: "UNDELIVERABLE_TEST_ADDRESS" };
   }
 
   const existing = await EmailNotificationLog.findOne({

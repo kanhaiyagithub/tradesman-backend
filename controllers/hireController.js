@@ -3,6 +3,7 @@ const User = require("../models/User");
 const TradesmanDetails = require("../models/TradesmanDetails");
 const { Op } = require("sequelize");
 const { sendPushNotification } = require("./notificationController");
+const { getRequesterWorld, worldWhere } = require("../services/dummyWorld");
 
 const ACTIVE_HIRE_STATUSES = ["pending", "accepted"];
 const TERMINAL_HIRE_STATUSES = ["rejected", "completed", "cancelled"];
@@ -116,8 +117,10 @@ exports.requestHire = async (req, res) => {
       return sendResponse(res, 400, false, "jobDescription must be 2000 characters or less");
     }
 
+    // A real client cannot hire a test tradesman, nor a test client a real one: the target
+    // simply "is not an approved tradesman" from the requester's side.
     const tradesman = await User.findOne({
-      where: { id: tradesmanId, role: "tradesman" },
+      where: { id: tradesmanId, role: "tradesman", ...worldWhere(await getRequesterWorld(req)) },
       include: [
         {
           model: TradesmanDetails,

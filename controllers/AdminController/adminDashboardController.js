@@ -2,8 +2,12 @@ const { Op, fn, col } = require("sequelize");
 const User = require("../../models/User");
 const UserSubscription = require("../../models/UserSubscription");
 const SubscriptionPlan = require("../../models/SubscriptionPlan");
-const TradesmanDetails = require("../../models/TradesmanDetails");
-const { buildSubscribedExistsLiteral } = require("../../services/subscriptionAccessService");
+const { countAwaitingReview } = require("../../services/pendingApprovalsService");
+
+// Test (dummy) users are real rows flagged isDummy; statistics only count the real ones.
+const REAL_USERS = { isDummy: false };
+/** Joins a subscription to its user, keeping only real users' subscriptions (no columns selected). */
+const realSubscriber = () => ({ model: User, as: "user", attributes: [], where: REAL_USERS, required: true });
 
 const SUBSCRIPTION_STATUSES = [
   "trialing",
@@ -53,48 +57,43 @@ exports.getSummary = async (req, res) => {
       activeRevenueRow,
       newRevenueRow,
     ] = await Promise.all([
-      User.count(),
-      User.count({ where: { role: "client" } }),
-      User.count({ where: { role: "tradesman" } }),
-      User.count({ where: { role: "tradesman", isVerified: true } }),
-      User.count({ where: { createdAt: { [Op.gte]: startOfMonth } } }),
+      // Every figure below ignores test (dummy) users, so Overview only reflects real activity.
+      User.count({ where: REAL_USERS }),
+      User.count({ where: { ...REAL_USERS, role: "client" } }),
+      User.count({ where: { ...REAL_USERS, role: "tradesman" } }),
+      User.count({ where: { ...REAL_USERS, role: "tradesman", isVerified: true } }),
+      User.count({ where: { ...REAL_USERS, createdAt: { [Op.gte]: startOfMonth } } }),
       // Awaiting review = subscribed and never reviewed or resubmitted
-      // (rejected ones wait on the tradesman).
-      TradesmanDetails.count({
-        where: {
-          isApproved: false,
-          verificationStatus: { [Op.in]: ["pending", "resubmitted"] },
-          [Op.and]: [buildSubscribedExistsLiteral("`TradesmanDetails`.`userId`")],
-        },
-        include: [{ model: User, as: "user", attributes: [], where: { role: "tradesman" }, required: true }],
-      }),
+      // (rejected ones wait on the tradesman). Same rule as the sidebar badge.
+      countAwaitingReview().then((counts) => counts.total),
       User.findAll({
         attributes: [
           [fn("YEAR", col("createdAt")), "year"],
           [fn("MONTH", col("createdAt")), "month"],
           [fn("COUNT", col("id")), "count"],
         ],
-        where: { createdAt: { [Op.gte]: seriesStart } },
+        where: { ...REAL_USERS, createdAt: { [Op.gte]: seriesStart } },
         group: [fn("YEAR", col("createdAt")), fn("MONTH", col("createdAt"))],
         raw: true,
       }),
       UserSubscription.findAll({
         attributes: ["status", [fn("COUNT", col("UserSubscription.id")), "count"]],
-        group: ["status"],
+        include: [realSubscriber()],
+        group: [col("UserSubscription.status")],
         raw: true,
       }),
       // Recurring revenue: monthly price of every currently active subscription.
       UserSubscription.findAll({
         attributes: [[fn("SUM", col("plan.priceMonthly")), "total"]],
         where: { status: "active" },
-        include: [{ model: SubscriptionPlan, as: "plan", attributes: [], required: true }],
+        include: [{ model: SubscriptionPlan, as: "plan", attributes: [], required: true }, realSubscriber()],
         raw: true,
       }),
       // Subscriptions that started this month and are active.
       UserSubscription.findAll({
         attributes: [[fn("SUM", col("plan.priceMonthly")), "total"]],
         where: { status: "active", createdAt: { [Op.gte]: startOfMonth } },
-        include: [{ model: SubscriptionPlan, as: "plan", attributes: [], required: true }],
+        include: [{ model: SubscriptionPlan, as: "plan", attributes: [], required: true }, realSubscriber()],
         raw: true,
       }),
     ]);
@@ -147,14 +146,14 @@ exports.buildMonthlySeries = buildMonthlySeries;
 ======================= */
 exports.getOverviewStats = async (req, res) => {
   try {
-    const totalUsers = await User.count();
+    const totalUsers = await User.count({ where: REAL_USERS });
 
     const totalClients = await User.count({
-      where: { role: "client" },
+      where: { ...REAL_USERS, role: "client" },
     });
 
     const activeTradesmen = await User.count({
-      where: { role: "tradesman" },
+      where: { ...REAL_USERS, role: "tradesman" },
     });
 
     const startOfMonth = new Date();
@@ -172,6 +171,7 @@ exports.getOverviewStats = async (req, res) => {
           as: "plan",
           attributes: ["priceMonthly"],
         },
+        realSubscriber(),
       ],
     });
 
@@ -208,6 +208,7 @@ exports.getAnalytics = async (req, res) => {
         [fn("MONTH", col("createdAt")), "month"],
         [fn("COUNT", col("id")), "count"],
       ],
+      where: REAL_USERS,
       group: [fn("MONTH", col("createdAt"))],
       order: [[fn("MONTH", col("createdAt")), "ASC"]],
     });
@@ -220,6 +221,7 @@ exports.getAnalytics = async (req, res) => {
           as: "plan",
           attributes: ["priceMonthly"],
         },
+        realSubscriber(),
       ],
     });
 
@@ -229,12 +231,12 @@ exports.getAnalytics = async (req, res) => {
     );
 
     const tradesmenStats = {
-      total: await User.count({ where: { role: "tradesman" } }),
+      total: await User.count({ where: { ...REAL_USERS, role: "tradesman" } }),
       verified: await User.count({
-        where: { role: "tradesman", isVerified: true },
+        where: { ...REAL_USERS, role: "tradesman", isVerified: true },
       }),
       pending: await User.count({
-        where: { role: "tradesman", isVerified: false },
+        where: { ...REAL_USERS, role: "tradesman", isVerified: false },
       }),
     };
 

@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const TradesmanDetails = require("../models/TradesmanDetails");
 const User = require("../models/User");
+const TradesType = require("../models/tradesTypeModel");
 const { Op } = require("sequelize");
 const storageConfig = require("../config/storage");
 const storageService = require("../services/storage/storageService");
@@ -56,50 +57,35 @@ const serializeDetails = (details) => {
   };
 };
 
+/** Adds the trade's licence rule (licenceRequired, licenceLabel) to serialized rows, so the dashboard can say what is expected. */
+const withTradeLicence = async (items) => {
+  const list = Array.isArray(items) ? items : [items];
+  const ids = [...new Set(list.map((item) => item && item.tradeTypeId).filter(Boolean))];
+  const trades = ids.length
+    ? await TradesType.findAll({ where: { id: ids }, attributes: ["id", "licenceRequired", "licenceLabel"] })
+    : [];
+  const byId = Object.fromEntries(trades.map((trade) => [trade.id, trade]));
+  for (const item of list) {
+    if (!item) continue;
+    const trade = byId[item.tradeTypeId];
+    item.licenceRequired = Boolean(trade && trade.licenceRequired);
+    item.licenceLabel = trade && trade.licenceRequired ? trade.licenceLabel : null;
+  }
+  return items;
+};
+
 const parseUserId = (value) => {
   const userId = Number(value);
   return Number.isInteger(userId) && userId > 0 ? userId : null;
 };
 
-const normalizeOptionalString = (value) => {
-  if (value === undefined || value === null) {
-    return "";
-  }
-
-  return String(value).trim();
-};
-
-const hasPortfolioPhotos = (portfolioPhotos) => {
-  if (Array.isArray(portfolioPhotos)) {
-    return portfolioPhotos.length > 0;
-  }
-
-  if (typeof portfolioPhotos === "string") {
-    try {
-      const parsed = JSON.parse(portfolioPhotos);
-      return Array.isArray(parsed) && parsed.length > 0;
-    } catch (error) {
-      return portfolioPhotos.trim().length > 0;
-    }
-  }
-
-  return false;
-};
-
-const validateApprovalReadiness = (details) => {
-  const missing = [];
-
-  if (!details.tradeTypeId) missing.push("tradeTypeId");
-  if (!normalizeOptionalString(details.tradeType)) missing.push("tradeType");
-  if (!normalizeOptionalString(details.businessName)) missing.push("businessName");
-  if (!normalizeOptionalString(details.shortBio)) missing.push("shortBio");
-  if (!normalizeOptionalString(details.licenseNumber)) missing.push("licenseNumber");
-  if (!details.licenseExpiry) missing.push("licenseExpiry");
-  if (!normalizeOptionalString(details.licenseDocument)) missing.push("licenseDocument");
-  if (!hasPortfolioPhotos(details.portfolioPhotos)) missing.push("portfolioPhotos");
-
-  return missing;
-};
+// The readiness rules live in a service (the subscription auto-approval needs them too); re-exported below.
+const { normalizeOptionalString, validateApprovalReadiness } = require("../services/approvalReadiness");
+const {
+  applyVerificationState,
+  isLicenceRequired,
+  buildLicenceRequiredLiteral,
+} = require("../services/verificationStateService");
 
 const getTradesmanDetailsForAdmin = async (userId) =>
   TradesmanDetails.findOne({
@@ -116,6 +102,7 @@ const getTradesmanDetailsForAdmin = async (userId) =>
           "mobile",
           "role",
           "isVerified",
+          "isDummy",
           "profileImage",
           "createdAt",
           "updatedAt",
@@ -145,9 +132,13 @@ async function getPending(req, res) {
     // Admins only review tradesmen who have subscribed. Pass
     // includeUnsubscribed=true to see everyone; the rejected list is never filtered.
     const includeUnsubscribed = String(req.query.includeUnsubscribed).toLowerCase() === "true";
-    if (!includeUnsubscribed && status !== "rejected") {
-      whereDetail[Op.and] = [buildSubscribedExistsLiteral("`TradesmanDetails`.`userId`")];
+    const conditions = [];
+    if (status !== "rejected") {
+      // Only licence-required trades need an admin to look at them; everyone else is approved automatically.
+      conditions.push(buildLicenceRequiredLiteral());
+      if (!includeUnsubscribed) conditions.push(buildSubscribedExistsLiteral("`TradesmanDetails`.`userId`"));
     }
+    if (conditions.length) whereDetail[Op.and] = conditions;
     if (tradeTypeId) {
       const parsedTradeTypeId = Number(tradeTypeId);
       if (!Number.isInteger(parsedTradeTypeId) || parsedTradeTypeId <= 0) {
@@ -173,7 +164,7 @@ async function getPending(req, res) {
         {
           model: User,
           as: "user",
-          attributes: ["id", "name", "email", "mobile", "role", "isVerified"],
+          attributes: ["id", "name", "email", "mobile", "role", "isVerified", "isDummy"],
           where: userWhere,
           required: true,
         },
@@ -191,7 +182,7 @@ async function getPending(req, res) {
 
     return send(res, 200, true, "Pending tradesmen fetched", {
       meta: { total: result.count, page, perPage: limit },
-      data: result.rows.map(serializeDetails),
+      data: await withTradeLicence(result.rows.map(serializeDetails)),
     });
   } catch (err) {
     console.error(err);
@@ -222,25 +213,24 @@ async function approve(req, res) {
       );
     }
 
-    const missingFields = validateApprovalReadiness(details);
+    // Licence details are required only for licence-required trades; a profile photo always.
+    const user = await User.findByPk(userId);
+    const licenceRequired = await isLicenceRequired(details.tradeTypeId);
+    const missingFields = validateApprovalReadiness(details, {
+      licenceRequired,
+      profileImage: user?.profileImage ?? null,
+    });
     if (missingFields.length) {
       return send(res, 400, false, "Tradesman profile is incomplete", {
         missingFields,
       });
     }
 
-    details.isApproved = true;
-    details.verificationStatus = "approved";
-    details.approvedBy = req.user.id;
-    details.approvedAt = new Date();
-    details.rejectionReason = null;
-    await details.save();
-
-    const user = await User.findByPk(userId);
-    if (user && "isVerified" in user) {
-      user.isVerified = true;
-      await user.save();
-    }
+    // Approving by hand is the licence check: only a licence-required trade ends up "licence verified".
+    await applyVerificationState(details, user, "approved", {
+      adminId: req.user.id,
+      licenceVerified: licenceRequired,
+    });
 
     sendPushNotification(
       userId,
@@ -292,18 +282,8 @@ async function reject(req, res) {
       return send(res, 400, false, "Tradesman is already rejected and awaiting resubmission");
     }
 
-    details.isApproved = false;
-    details.verificationStatus = "rejected";
-    details.rejectionReason = reason;
-    details.approvedBy = req.user.id;
-    details.approvedAt = new Date();
-    await details.save();
-
     const user = await User.findByPk(userId);
-    if (user && "isVerified" in user) {
-      user.isVerified = false;
-      await user.save();
-    }
+    await applyVerificationState(details, user, "rejected", { adminId: req.user.id, reason });
 
     sendPushNotification(
       userId,
@@ -338,7 +318,7 @@ async function getOne(req, res) {
     const details = await getTradesmanDetailsForAdmin(userId);
 
     if (!details) return send(res, 404, false, "Not found");
-    return send(res, 200, true, "Fetched", serializeDetails(details));
+    return send(res, 200, true, "Fetched", await withTradeLicence(serializeDetails(details)));
   } catch (err) {
     console.error(err);
     return send(res, 500, false, "Server error");

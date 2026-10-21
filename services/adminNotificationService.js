@@ -3,6 +3,7 @@ const User = require("../models/User");
 const TradesmanDetails = require("../models/TradesmanDetails");
 const { sendAdminTradesmanVerificationEmail } = require("./emailService");
 const { publishApprovalsUpdate } = require("./adminEventService");
+const { isLicenceRequired } = require("./verificationStateService");
 
 const getReviewUrl = (tradesmanId) => {
   const base = String(process.env.ADMIN_PANEL_URL || "").trim().replace(/\/+$/, "");
@@ -26,9 +27,19 @@ const notifyAdminsTradesmanNeedsVerification = async ({
       return { notified: 0, reason: "NOT_A_TRADESMAN" };
     }
 
+    // A test tradesman is not real work for the admins: no verification emails, no live alert.
+    if (tradesman.isDummy) {
+      return { notified: 0, reason: "DUMMY_USER" };
+    }
+
     const details = await TradesmanDetails.findOne({ where: { userId } });
     if (!details || details.isApproved) {
       return { notified: 0, reason: details ? "ALREADY_APPROVED" : "NO_DETAILS" };
+    }
+
+    // Only a licence needs an admin's eyes. Everyone else is approved automatically, so there is nothing to review.
+    if (!(await isLicenceRequired(details.tradeTypeId))) {
+      return { notified: 0, reason: "NO_REVIEW_NEEDED" };
     }
 
     // A first-time "please verify" email is only for a profile nobody has

@@ -14,6 +14,7 @@ const {
 const {
   sendTravelMatchCreatedEmails,
 } = require("./emailService");
+const { inSameWorld } = require("./dummyWorld");
 
 /**
  * Calculates the distance between two coordinates using the Haversine formula.
@@ -496,6 +497,17 @@ function buildCandidateTravelPlanWhere(alert, now) {
  * @returns {Promise<import('sequelize').Model|null>} Created match or null when duplicate.
  */
 async function createMatchAndNotify({ alert, travelPlan, bestMatch }) {
+  // Test (dummy) users only ever match other test users, and real users only real ones, so a
+  // tester can never trigger notifications or emails to a real person (or the other way round).
+  // Every match, from either direction and from the live-location flow, is created here.
+  if (!(await inSameWorld(alert.clientId, travelPlan.tradesmanId))) {
+    console.log("[TRAVEL_ALERT] Skipping match between a test user and a real user", {
+      travelPlanId: travelPlan.id,
+      clientTradeAlertId: alert.id,
+    });
+    return null;
+  }
+
   const existing = await TravelPlanAlertMatch.findOne({
     where: {
       travelPlanId: travelPlan.id,

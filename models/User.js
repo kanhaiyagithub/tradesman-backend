@@ -59,6 +59,14 @@ const User = sequelize.define(
     isVerified: {
       type: DataTypes.BOOLEAN,
       defaultValue: false
+    },
+
+    // Test account made by an admin from the dashboard. Dummy users are kept out of real
+    // statistics and never mix with real users (see migration 0017).
+    isDummy: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false
     }
 
   },

@@ -271,6 +271,9 @@ const trackAttributionOnly = async ({ userId, metaAttribution, ip, userAgent }) 
  */
 const trackRegistration = async ({ user, method, metaAttribution, ip, userAgent }) => {
   try {
+    // Test accounts must never reach Meta: they would pollute real ad-conversion data.
+    if (user && user.isDummy) return { tracked: false, reason: "dummy" };
+
     const config = getConfig();
     if (!isReady(config)) return { tracked: false, reason: "disabled" };
     if (!user || !user.id) return { tracked: false, reason: "no_user" };

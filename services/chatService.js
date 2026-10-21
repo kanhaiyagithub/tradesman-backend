@@ -289,11 +289,11 @@ const sendDirectMessage = async ({ senderId, receiverId, message }) => {
     const [sender, receiver] = await Promise.all([
       User.findByPk(normalizedSenderId, {
         transaction: tx,
-        attributes: ['id', 'name', 'email', 'role', 'profileImage'],
+        attributes: ['id', 'name', 'email', 'role', 'profileImage', 'isDummy'],
       }),
       User.findByPk(normalizedReceiverId, {
         transaction: tx,
-        attributes: ['id', 'name', 'email', 'role', 'profileImage'],
+        attributes: ['id', 'name', 'email', 'role', 'profileImage', 'isDummy'],
       }),
     ]);
 
@@ -302,6 +302,11 @@ const sendDirectMessage = async ({ senderId, receiverId, message }) => {
     }
 
     if (!receiver) {
+      throw new Error('Receiver not found');
+    }
+
+    // Test users and real users cannot message each other: to the sender it looks like a missing user.
+    if (Boolean(sender.isDummy) !== Boolean(receiver.isDummy)) {
       throw new Error('Receiver not found');
     }
 

@@ -661,7 +661,8 @@ test("admin approval rejects incomplete tradesman profiles", async () => {
   assert.equal(response.status, 400);
   assert.equal(response.body.message, "Tradesman profile is incomplete");
   assert.ok(response.body.data.missingFields.includes("licenseDocument"));
-  assert.ok(response.body.data.missingFields.includes("portfolioPhotos"));
+  // Portfolio photos are optional now; only the licence is compulsory (and only for licence-required trades).
+  assert.equal(response.body.data.missingFields.includes("portfolioPhotos"), false);
 });
 
 test("admin rejection requires a reason", async () => {

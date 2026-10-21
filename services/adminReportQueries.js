@@ -23,9 +23,28 @@ const parsePaging = (query) => {
   return { paged, page, limit, offset: (page - 1) * limit };
 };
 
-/** Users report filters: search (name/email), role, verified. Returns { where } or { error }. */
+const DUMMY_MODES = ["exclude", "include", "only"];
+
+/**
+ * Test (dummy) users: `dummy` = exclude (default, real users only) | include (everyone) | only (test users).
+ * Returns { value } where value is true/false for "only"/"exclude" or undefined for "include",
+ * or { error }.
+ */
+const parseDummyMode = (query) => {
+  const mode = query.dummy === undefined || query.dummy === "" ? "exclude" : String(query.dummy);
+  if (!DUMMY_MODES.includes(mode)) {
+    return { error: `dummy must be one of: ${DUMMY_MODES.join(", ")}` };
+  }
+  return { value: mode === "include" ? undefined : mode === "only" };
+};
+
+/** Users report filters: search (name/email), role, verified, dummy. Returns { where } or { error }. */
 const buildUsersFilter = (query) => {
   const where = {};
+
+  const dummy = parseDummyMode(query);
+  if (dummy.error) return { error: dummy.error };
+  if (dummy.value !== undefined) where.isDummy = dummy.value;
 
   const like = likeTerm(query);
   if (like) where[Op.or] = [{ name: like }, { email: like }];
@@ -47,9 +66,13 @@ const buildUsersFilter = (query) => {
   return { where };
 };
 
-/** Subscriptions report filters: search (user name/email, plan name), planId, status. */
+/** Subscriptions report filters: search (user name/email, plan name), planId, status, dummy. */
 const buildSubscriptionsFilter = (query) => {
   const where = {};
+
+  const dummy = parseDummyMode(query);
+  if (dummy.error) return { error: dummy.error };
+  if (dummy.value !== undefined) where["$user.isDummy$"] = dummy.value;
 
   const like = likeTerm(query);
   if (like) {
@@ -75,6 +98,8 @@ const buildSubscriptionsFilter = (query) => {
 };
 
 module.exports = {
+  DUMMY_MODES,
+  parseDummyMode,
   USER_ROLES,
   SUBSCRIPTION_STATUSES,
   escapeLike,

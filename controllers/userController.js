@@ -12,7 +12,6 @@ const {
 } = require("../services/accountDeletionService");
 const UserSubscription = require("../models/UserSubscription");
 const { buildAccessibleSubscriptionWhere } = require("../services/subscriptionAccessService");
-const { validateApprovalReadiness } = require("./tradesmanApprovalController");
 const {
   notifyAdminsTradesmanNeedsVerification,
 } = require("../services/adminNotificationService");
@@ -24,6 +23,12 @@ const {
 } = require("../utils/authTokens");
 const { ACTIVE_TRAVEL_PLAN_STATUSES } = require("../services/travelPlanStatusService");
 const { getLegCandidates } = require("../services/travelAlertService");
+const { getRequesterWorld, worldWhere } = require("../services/dummyWorld");
+const { isUndeliverableAddress } = require("../utils/emailAddress");
+const { parseLicenceInput, normalizeOptionalText } = require("../services/licenceInput");
+const { validateApprovalReadiness: checkReadiness } = require("../services/approvalReadiness");
+const { applyVerificationState, licenceExpiryStatus } = require("../services/verificationStateService");
+const { autoApproveIfUnlicensed } = require("../services/tradeLicenceService");
 
 const DEFAULT_FILTER_RADIUS_KM = 15;
 // Upper limit for an app-supplied radiusKm.
@@ -587,7 +592,7 @@ exports.register = async (req, res) => {
       return sendResponse(res, 400, false, "User already exists");
     }
 
-    // 2) Tradesman required fields + files
+    // 2) Tradesman required fields + files. A profile photo is always compulsory; portfolio photos never are.
     if (role === "tradesman") {
       if (!tradeTypeId || !businessName || !shortBio) {
         return sendResponse(
@@ -597,17 +602,6 @@ exports.register = async (req, res) => {
           "tradeTypeId, businessName, shortBio required for tradesman",
         );
       }
-      if (!licenseNumber || !licenseExpiry) {
-        return sendResponse(
-          res,
-          400,
-          false,
-          "licenseNumber & licenseExpiry required for tradesman",
-        );
-      }
-      if (Number.isNaN(new Date(licenseExpiry).getTime())) {
-        return sendResponse(res, 400, false, "licenseExpiry must be a valid date");
-      }
       if (!profileImageFile) {
         return sendResponse(
           res,
@@ -616,27 +610,11 @@ exports.register = async (req, res) => {
           "profileImage file is required for tradesman",
         );
       }
-      if (!licenseDocFile) {
-        return sendResponse(
-          res,
-          400,
-          false,
-          "licenseDocument file is required for tradesman",
-        );
-      }
-      if (!portfolioFiles.length) {
-        return sendResponse(
-          res,
-          400,
-          false,
-          "At least one portfolioPhotos file is required for tradesman",
-        );
-      }
     }
 
-    // 3) Password hash
-    const hashedPass = await bcrypt.hash(password, 10);
     let resolvedTradeType = tradeType ? String(tradeType).trim() : null;
+    // The licence that will be stored for a tradesman (null when none is stored).
+    let licenceToStore = null;
 
     if (role === "tradesman") {
       const tradeRecord = await TradesType.findOne({
@@ -648,7 +626,43 @@ exports.register = async (req, res) => {
       }
 
       resolvedTradeType = tradeRecord.name;
+
+      // The SERVER decides whether this trade needs a licence (the app's copy of the trade list may be stale).
+      const licence = parseLicenceInput({
+        number: licenseNumber,
+        expiry: licenseExpiry,
+        hasDocument: Boolean(licenseDocFile),
+      });
+
+      if (licence.expiryInvalid) {
+        return sendResponse(res, 400, false, "licenseExpiry must be a valid date");
+      }
+
+      if (tradeRecord.licenceRequired) {
+        if (licence.missing.length) {
+          return sendResponse(
+            res,
+            400,
+            false,
+            `A licence is required for ${tradeRecord.name}. Please provide: ${licence.missing.join(", ")}`,
+            {
+              code: "LICENCE_REQUIRED",
+              licenceRequired: true,
+              licenceLabel: tradeRecord.licenceLabel,
+              missingFields: licence.missing,
+            },
+          );
+        }
+        licenceToStore = licence;
+      } else if (licence.complete) {
+        // Optional for this trade: kept if all three were given (shown to admins, never counted as verified).
+        // Partial or empty licence fields (older app versions always send them) are simply ignored.
+        licenceToStore = licence;
+      }
     }
+
+    // 3) Password hash
+    const hashedPass = await bcrypt.hash(password, 10);
 
     // 4) + 5) Create the user and tradesman profile atomically. Files are
     // written first; if anything fails the transaction rolls back and the
@@ -678,11 +692,14 @@ exports.register = async (req, res) => {
         );
 
         if (role === "tradesman") {
-          const savedLicenseDocumentKey = await storageService.saveSingleImage({
-            file: licenseDocFile,
-            category: "license",
-          });
-          savedFiles.push({ key: savedLicenseDocumentKey, category: "license" });
+          let savedLicenseDocumentKey = null;
+          if (licenceToStore) {
+            savedLicenseDocumentKey = await storageService.saveSingleImage({
+              file: licenseDocFile,
+              category: "license",
+            });
+            savedFiles.push({ key: savedLicenseDocumentKey, category: "license" });
+          }
 
           const portfolioPhotos = await storageService.saveMultipleImages({
             files: portfolioFiles,
@@ -699,12 +716,12 @@ exports.register = async (req, res) => {
               tradeTypeId: Number(tradeTypeId),
               businessName,
               shortBio,
-              licenseNumber,
-              licenseExpiry,
+              licenseNumber: licenceToStore ? licenceToStore.number : null,
+              licenseExpiry: licenceToStore ? licenceToStore.expiry : null,
               licenseDocument: savedLicenseDocumentKey,
               submittedAt: new Date(),
               portfolioPhotos,
-              portfolioDescription,
+              portfolioDescription: normalizeOptionalText(portfolioDescription),
             },
             { transaction },
           );
@@ -839,13 +856,47 @@ const getRatingSummaryMap = async (userIds) => {
   );
 };
 
+const isTruthyFlag = (value) => value === true || ["true", "1", "yes"].includes(String(value).toLowerCase());
+
+/** { [tradeTypeId]: { licenceRequired, licenceLabel } } for the given trade ids (one query). */
+const getTradeLicenceMap = async (tradeTypeIds) => {
+  const ids = [...new Set((tradeTypeIds || []).filter(Boolean).map(Number))];
+  if (!ids.length) return {};
+  const trades = await TradesType.findAll({
+    where: { id: ids },
+    attributes: ["id", "licenceRequired", "licenceLabel"],
+  });
+  return Object.fromEntries(
+    trades.map((trade) => [
+      trade.id,
+      { licenceRequired: Boolean(trade.licenceRequired), licenceLabel: trade.licenceLabel || null },
+    ])
+  );
+};
+
+/**
+ * The licence facts clients may see. "Licence verified" is the admin's approval AND a licence that has not run
+ * out (judged on the Brisbane calendar day, so it can lapse without anyone touching the record).
+ * Never includes the licence number, expiry date or document.
+ */
+const toPublicLicenceInfo = (detail, tradeMap = {}) => {
+  const trade = (detail && tradeMap[detail.tradeTypeId]) || null;
+  const expired = licenceExpiryStatus(detail?.licenseExpiry).expired;
+  return {
+    licenceRequired: Boolean(trade?.licenceRequired),
+    licenceLabel: trade?.licenceRequired ? trade.licenceLabel : null,
+    licenceVerified: Boolean(detail?.licenceVerified) && !expired,
+  };
+};
+
 /**
  * The ONLY shape the public/directory endpoints return for a user. It never
  * includes contact details (email, mobile), Google IDs, licence fields or
  * approval fields.
  *
  * Tradesmen: id, name, role, profileImage, tradeType, tradeTypeId,
- * businessName, shortBio, avgRating, reviewCount, isVerified (= approved).
+ * businessName, shortBio, avgRating, reviewCount, isVerified (= licence verified by an admin, and not expired),
+ * licenceRequired, licenceLabel, licenceVerified. Everyone returned by these endpoints is already approved and listed.
  * Everyone else: id, name, role, profileImage.
  *
  * `TradesmanDetail` is kept as a small nested object (same safe fields) so
@@ -854,7 +905,7 @@ const getRatingSummaryMap = async (userIds) => {
  * @param {object} userJson - Plain user (with optional TradesmanDetail).
  * @param {{avgRating: number, reviewCount: number}} [ratingSummary]
  */
-const toPublicUserProfile = (userJson, ratingSummary) => {
+const toPublicUserProfile = (userJson, ratingSummary, tradeMap = {}) => {
   const publicProfile = {
     id: userJson.id,
     name: userJson.name,
@@ -868,6 +919,7 @@ const toPublicUserProfile = (userJson, ratingSummary) => {
 
   const detail = userJson.TradesmanDetail || null;
   const summary = ratingSummary || { avgRating: 0, reviewCount: 0 };
+  const licenceInfo = toPublicLicenceInfo(detail, tradeMap);
 
   return {
     ...publicProfile,
@@ -877,7 +929,8 @@ const toPublicUserProfile = (userJson, ratingSummary) => {
     shortBio: detail?.shortBio || null,
     avgRating: summary.avgRating,
     reviewCount: summary.reviewCount,
-    isVerified: Boolean(detail?.isApproved),
+    ...licenceInfo,
+    isVerified: licenceInfo.licenceVerified,
     TradesmanDetail: detail
       ? {
           tradeTypeId: detail.tradeTypeId || null,
@@ -902,7 +955,8 @@ exports.getAllUsers = async (req, res) => {
     const { page, limit, offset } = parsePagination(req);
     const { search, role } = req.query;
 
-    const where = {};
+    // Test users and real users never see each other.
+    const where = { ...worldWhere(await getRequesterWorld(req)) };
     if (role) where.role = role;
 
     if (search) {
@@ -917,7 +971,7 @@ exports.getAllUsers = async (req, res) => {
         {
           model: TradesmanDetails,
           as: "TradesmanDetail",
-          attributes: ["tradeTypeId", "tradeType", "businessName", "shortBio", "isApproved"],
+          attributes: ["tradeTypeId", "tradeType", "businessName", "shortBio", "isApproved", "licenceVerified", "licenseExpiry"],
         },
       ],
       limit,
@@ -929,8 +983,9 @@ exports.getAllUsers = async (req, res) => {
       result.rows.filter((row) => row.role === "tradesman").map((row) => row.id)
     );
 
+    const tradeMap = await getTradeLicenceMap(result.rows.map((row) => row.TradesmanDetail?.tradeTypeId));
     result.rows = result.rows.map((row) =>
-      toPublicUserProfile(row.toJSON(), ratingMap[row.id])
+      toPublicUserProfile(row.toJSON(), ratingMap[row.id], tradeMap)
     );
 
     return paginatedResponse(res, "Users fetched", result, page, limit);
@@ -951,7 +1006,8 @@ exports.getAllTradesmen = async (req, res) => {
     const { page, limit, offset } = parsePagination(req);
     const { tradeTypeId, tradeType, search } = req.query;
 
-    const whereUser = { role: "tradesman" };
+    // Test users and real users never see each other (anonymous callers see real users).
+    const whereUser = { role: "tradesman", ...worldWhere(await getRequesterWorld(req)) };
 
     // Search on the public name only (never email or mobile)
     if (search) {
@@ -986,7 +1042,7 @@ exports.getAllTradesmen = async (req, res) => {
         {
           model: TradesmanDetails,
           as: "TradesmanDetail",
-          attributes: ["tradeTypeId", "tradeType", "businessName", "shortBio", "isApproved"],
+          attributes: ["tradeTypeId", "tradeType", "businessName", "shortBio", "isApproved", "licenceVerified", "licenseExpiry"],
           where: tradesmanWhere,
           required: true,
         },
@@ -1002,8 +1058,9 @@ exports.getAllTradesmen = async (req, res) => {
 
     const ratingMap = await getRatingSummaryMap(result.rows.map((row) => row.id));
 
+    const tradeMap = await getTradeLicenceMap(result.rows.map((row) => row.TradesmanDetail?.tradeTypeId));
     const formattedRows = result.rows.map((user) =>
-      toPublicUserProfile(user.toJSON(), ratingMap[user.id])
+      toPublicUserProfile(user.toJSON(), ratingMap[user.id], tradeMap)
     );
 
     return res.status(200).json({
@@ -1033,7 +1090,8 @@ exports.getAllClients = async (req, res) => {
     const { page, limit, offset } = parsePagination(req);
     const { search } = req.query;
 
-    const where = { role: "client" };
+    // Test users and real users never see each other.
+    const where = { role: "client", ...worldWhere(await getRequesterWorld(req)) };
 
     if (search) {
       where.name = { [Op.like]: `%${search}%` };
@@ -1066,14 +1124,15 @@ exports.getAllClients = async (req, res) => {
  */
 exports.getUserById = async (req, res) => {
   try {
+    // A user from the other world is "not found", exactly like a missing one.
     const user = await User.findOne({
-      where: { id: req.params.id },
+      where: { id: req.params.id, ...worldWhere(await getRequesterWorld(req)) },
       attributes: ["id", "name", "role", "profileImage"],
       include: [
         {
           model: TradesmanDetails,
           as: "TradesmanDetail",
-          attributes: ["tradeTypeId", "tradeType", "businessName", "shortBio", "isApproved"],
+          attributes: ["tradeTypeId", "tradeType", "businessName", "shortBio", "isApproved", "licenceVerified", "licenseExpiry"],
         },
       ],
     });
@@ -1083,12 +1142,13 @@ exports.getUserById = async (req, res) => {
     const ratingMap =
       user.role === "tradesman" ? await getRatingSummaryMap([user.id]) : {};
 
+    const tradeMap = await getTradeLicenceMap([user.TradesmanDetail?.tradeTypeId]);
     return sendResponse(
       res,
       200,
       true,
       "User fetched",
-      toPublicUserProfile(user.toJSON(), ratingMap[user.id])
+      toPublicUserProfile(user.toJSON(), ratingMap[user.id], tradeMap)
     );
   } catch (error) {
     console.error("Fetch User Error:", error);
@@ -1256,13 +1316,16 @@ exports.forgotPassword = async (req, res) => {
       otp,
     });
 
-    await transporter.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
-      to: user.email,
-      subject: emailContent.subject,
-      text: emailContent.text,
-      html: emailContent.html,
-    });
+    // Test accounts on reserved domains (example.test, ...) cannot receive mail: do not send, same answer.
+    if (!isUndeliverableAddress(user.email)) {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+        to: user.email,
+        subject: emailContent.subject,
+        text: emailContent.text,
+        html: emailContent.html,
+      });
+    }
 
     return sendResponse(res, 200, true, genericMessage);
   } catch (err) {
@@ -1389,6 +1452,7 @@ exports.getMeProfile = async (req, res) => {
 
     const userJson = user.toJSON();
     const reviewSummary = await getUserReceivedReviewSummary(req.user.id);
+    const meTradeMap = await getTradeLicenceMap([userJson.TradesmanDetail?.tradeTypeId]);
 
     return sendResponse(
       res,
@@ -1397,6 +1461,7 @@ exports.getMeProfile = async (req, res) => {
       "User fetched",
       serializeUserWithTradesman({
         ...userJson,
+        ...(userJson.TradesmanDetail ? toPublicLicenceInfo(userJson.TradesmanDetail, meTradeMap) : {}),
         tradeTypeId: userJson.TradesmanDetail?.tradeTypeId || null,
         tradeType: userJson.TradesmanDetail?.tradeType || null,
         ...reviewSummary,
@@ -1428,7 +1493,7 @@ exports.getClientProfileForTradesman = async (req, res) => {
     }
 
     const client = await User.findOne({
-      where: { id: clientId, role: "client" },
+      where: { id: clientId, role: "client", ...worldWhere(await getRequesterWorld(req)) },
       attributes: ["id", "name", "email", "mobile", "profileImage", "role", "createdAt"],
     });
 
@@ -1504,13 +1569,15 @@ exports.getFullUserProfile = async (req, res) => {
     const userId = req.params.id;
 
     /* ================= USER + DETAILS + ACTIVE TRAVEL PLAN ================= */
-    const user = await User.findByPk(userId, {
+    // A user from the other world is "not found", exactly like a missing one.
+    const user = await User.findOne({
+      where: { id: userId, ...worldWhere(await getRequesterWorld(req)) },
       attributes: ["id", "name", "profileImage", "role"],
       include: [
         {
           model: TradesmanDetails,
           as: "TradesmanDetail",
-          attributes: ["tradeTypeId", "tradeType", "businessName", "shortBio"],
+          attributes: ["tradeTypeId", "tradeType", "businessName", "shortBio", "portfolioPhotos", "portfolioDescription", "licenceVerified", "licenseExpiry"],
         },
         {
           model: TravelPlan,
@@ -1559,6 +1626,10 @@ exports.getFullUserProfile = async (req, res) => {
 
     /* ================= REVIEWS ================= */
     const reviewSummary = await getUserReceivedReviewSummary(userId);
+    const fullTradeMap = await getTradeLicenceMap([user.TradesmanDetail?.tradeTypeId]);
+    const licenceInfo = user.TradesmanDetail
+      ? toPublicLicenceInfo(user.TradesmanDetail.toJSON(), fullTradeMap)
+      : {};
 
     /* ================= ACTIVE TRAVEL PLAN ================= */
     const activePlan = user.travelPlans?.[0] || null;
@@ -1575,6 +1646,10 @@ exports.getFullUserProfile = async (req, res) => {
         tradeTypeId: user.TradesmanDetail?.tradeTypeId || null,
         tradeType: user.TradesmanDetail?.tradeType || null,
         description: user.TradesmanDetail?.shortBio || null,
+        // Work photos are public (the licence document never is).
+        portfolioPhotos: toPublicPortfolioPhotos(user.TradesmanDetail?.portfolioPhotos || []),
+        portfolioDescription: user.TradesmanDetail?.portfolioDescription || null,
+        ...licenceInfo,
 
         /* RATING */
         rating: reviewSummary.rating,
@@ -2039,6 +2114,12 @@ exports.filterTradesmen = async (req, res) => {
       isApproved: true,
     };
 
+    // Opt-in: only tradespeople whose licence an admin has verified. ("Verified" in the older sense, i.e. approved,
+    // is what everyone already gets, so that cannot change under old app versions.)
+    if (isTruthyFlag(input.licenceVerifiedOnly)) {
+      tradesmanWhere.licenceVerified = true;
+    }
+
     if (normalizedTradeTypeIds.length === 1) {
       tradesmanWhere.tradeTypeId = normalizedTradeTypeIds[0];
     } else if (normalizedTradeTypeIds.length > 1) {
@@ -2066,8 +2147,9 @@ exports.filterTradesmen = async (req, res) => {
       });
     }
 
+    // Test tradesmen are only shown to test users, and real tradesmen only to real users.
     const tradesmen = await User.findAll({
-      where: { role: "tradesman" },
+      where: { role: "tradesman", ...worldWhere(await getRequesterWorld(req)) },
       include,
       order: [["createdAt", "DESC"]],
     });
@@ -2124,6 +2206,8 @@ exports.filterTradesmen = async (req, res) => {
         },
       ]),
     );
+
+    const filterTradeMap = await getTradeLicenceMap(tradesmen.map((row) => row.TradesmanDetail?.tradeTypeId));
 
     const filteredTradesmen = tradesmen
       .map((tradesman) => {
@@ -2214,7 +2298,7 @@ exports.filterTradesmen = async (req, res) => {
         // Public profile only: never the raw user row (no email, mobile,
         // password hash, licence or approval fields).
         return {
-          ...toPublicUserProfile(json, reviewSummary),
+          ...toPublicUserProfile(json, reviewSummary, filterTradeMap),
           matchedStop: bestMatchedStop
             ? {
                 name: bestMatchedStop.name,
@@ -2292,26 +2376,45 @@ exports.filterTradesmen = async (req, res) => {
   }
 };
 
+/** Same calendar day? (licence expiry is a date, not a moment) */
+const sameDay = (a, b) => {
+  if (!a || !b) return false;
+  const first = new Date(a);
+  const second = new Date(b);
+  if (Number.isNaN(first.getTime()) || Number.isNaN(second.getTime())) return false;
+  return first.toISOString().slice(0, 10) === second.toISOString().slice(0, 10);
+};
+
+/**
+ * PUT /api/users/profile/update (tradesperson)
+ *
+ * Everything is checked BEFORE anything is saved or uploaded, then saved in one transaction, so a bad request
+ * never leaves a half-updated profile.
+ *
+ * Licence rules:
+ *  - Switching to a licence-required trade needs licence number, expiry and document in the same request. The
+ *    profile goes back to "pending" (not listed, not licence verified) until an admin approves it, with no
+ *    "approved" notification. Switching to any other trade clears "licence verified"; an approved profile stays
+ *    listed, one waiting for review is approved automatically once they pay.
+ *  - On a licence-required trade the licence cannot be edited here (that would bypass the admin's check): after a
+ *    rejection or an expiry the person resubmits it with POST /api/users/profile/resubmit.
+ *  - On an unlicensed trade licence details are optional information and can be edited freely.
+ *  - Portfolio photos are optional; the profile photo can be replaced but never removed.
+ */
 exports.updateTradesmanProfile = async (req, res) => {
   try {
-    const userId = req.user.id; // 🔐 token se user id
+    const userId = req.user.id; // from the token
 
-    /* ================= FIND USER ================= */
     const user = await User.findByPk(userId);
     if (!user) {
       return sendResponse(res, 404, false, "User not found");
     }
 
-    /* ================= FIND TRADESMAN ================= */
-    const tradesman = await TradesmanDetails.findOne({
-      where: { userId },
-    });
-
+    const tradesman = await TradesmanDetails.findOne({ where: { userId } });
     if (!tradesman) {
       return sendResponse(res, 404, false, "Tradesman details not found");
     }
 
-    /* ================= BODY DATA ================= */
     const {
       name,
       mobile,
@@ -2324,73 +2427,172 @@ exports.updateTradesmanProfile = async (req, res) => {
       portfolioDescription,
     } = req.body;
 
-    /* ================= FILES ================= */
     const profileImageFile = req.files?.profileImage?.[0] || null;
+    const licenseDocFile = req.files?.licenseDocument?.[0] || null;
     const portfolioFiles = req.files?.portfolioPhotos || [];
 
-    /* ================= UPDATE USER ================= */
-    if (name !== undefined) user.name = name;
-    if (mobile !== undefined) user.mobile = mobile;
+    /* ---------- 1. validate everything first ---------- */
 
-    if (profileImageFile) {
-      const previousProfileImage = user.profileImage;
-      user.profileImage = await storageService.saveSingleImage({
-        file: profileImageFile,
-        category: "profile",
-      });
-
-      if (previousProfileImage && previousProfileImage !== user.profileImage) {
-        await storageService.deleteObject(previousProfileImage, {
-          category: "profile",
-        });
-      }
-    }
-
-    await user.save();
-
-    /* ================= UPDATE TRADESMAN DETAILS ================= */
+    // Which trade? An id is exact; older app versions send only the trade's name.
+    let newTrade = null;
     if (tradeTypeId !== undefined) {
-      const tradeRecord = await TradesType.findOne({
-        where: { id: Number(tradeTypeId), isActive: true },
-      });
+      newTrade = await TradesType.findOne({ where: { id: Number(tradeTypeId), isActive: true } });
+      if (!newTrade) return sendResponse(res, 400, false, "Invalid tradeTypeId");
+    } else if (tradeType !== undefined) {
+      const wanted = String(tradeType).trim().toLowerCase();
+      const active = await TradesType.findAll({ where: { isActive: true } });
+      newTrade = active.find((trade) => trade.name.trim().toLowerCase() === wanted) || null;
+      if (!newTrade) return sendResponse(res, 400, false, "Invalid tradeType");
+    }
 
-      if (!tradeRecord) {
-        return sendResponse(res, 400, false, "Invalid tradeTypeId");
+    const tradeChanged = Boolean(newTrade) && newTrade.id !== tradesman.tradeTypeId;
+    const currentTrade = tradesman.tradeTypeId ? await TradesType.findByPk(tradesman.tradeTypeId) : null;
+    const effectiveTrade = newTrade || currentTrade;
+    const switchingToLicensed = tradeChanged && Boolean(newTrade.licenceRequired);
+    const licenceLocked = !switchingToLicensed && Boolean(effectiveTrade && effectiveTrade.licenceRequired);
+
+    const licence = parseLicenceInput({
+      number: licenseNumber,
+      expiry: licenseExpiry,
+      hasDocument: Boolean(licenseDocFile),
+    });
+
+    if (switchingToLicensed) {
+      if (licence.expiryInvalid) return sendResponse(res, 400, false, "licenseExpiry must be a valid date");
+      if (licence.missing.length) {
+        return sendResponse(
+          res,
+          400,
+          false,
+          `A licence is required for ${newTrade.name}. Please provide: ${licence.missing.join(", ")}`,
+          {
+            code: "LICENCE_REQUIRED",
+            licenceRequired: true,
+            licenceLabel: newTrade.licenceLabel,
+            missingFields: licence.missing,
+          },
+        );
+      }
+    } else if (licenceLocked) {
+      const numberChanged =
+        licenseNumber !== undefined && licence.number !== normalizeOptionalText(tradesman.licenseNumber);
+      const expiryChanged =
+        licenseExpiry !== undefined && !sameDay(licence.expiry, tradesman.licenseExpiry);
+      if (numberChanged || expiryChanged || licenseDocFile) {
+        return sendResponse(
+          res,
+          400,
+          false,
+          "Your licence cannot be changed here. If it was rejected or has expired, resubmit it for review.",
+          { code: "LICENCE_LOCKED" },
+        );
+      }
+    } else if (licence.expiryInvalid) {
+      return sendResponse(res, 400, false, "licenseExpiry must be a valid date");
+    }
+
+    /* ---------- 2. save the new files ---------- */
+
+    const newFiles = [];
+    const staleFiles = [];
+
+    try {
+      let nextProfileImage = user.profileImage;
+      if (profileImageFile) {
+        nextProfileImage = await storageService.saveSingleImage({ file: profileImageFile, category: "profile" });
+        newFiles.push({ key: nextProfileImage, category: "profile" });
+        if (user.profileImage && user.profileImage !== nextProfileImage) {
+          staleFiles.push({ key: user.profileImage, category: "profile" });
+        }
       }
 
-      tradesman.tradeTypeId = Number(tradeTypeId);
-      tradesman.tradeType = tradeRecord.name;
-    } else if (tradeType !== undefined) {
-      tradesman.tradeType = tradeType;
-    }
-    if (businessName !== undefined) tradesman.businessName = businessName;
-    if (shortBio !== undefined) tradesman.shortBio = shortBio;
-    if (licenseNumber !== undefined) tradesman.licenseNumber = licenseNumber;
-    if (licenseExpiry !== undefined) tradesman.licenseExpiry = licenseExpiry;
-    if (portfolioDescription !== undefined) {
-      tradesman.portfolioDescription = portfolioDescription;
-    }
+      let nextLicenceDocument = tradesman.licenseDocument;
+      if (licenseDocFile && !licenceLocked) {
+        nextLicenceDocument = await storageService.saveSingleImage({ file: licenseDocFile, category: "license" });
+        newFiles.push({ key: nextLicenceDocument, category: "license" });
+        if (tradesman.licenseDocument && tradesman.licenseDocument !== nextLicenceDocument) {
+          staleFiles.push({ key: tradesman.licenseDocument, category: "license" });
+        }
+      }
 
-    // ❌ licenseDocument update NOT allowed
+      let nextPortfolio = tradesman.portfolioPhotos;
+      if (portfolioFiles.length > 0) {
+        nextPortfolio = await storageService.saveMultipleImages({ files: portfolioFiles, category: "portfolio" });
+        nextPortfolio.forEach((key) => newFiles.push({ key, category: "portfolio" }));
+        const previous = Array.isArray(tradesman.portfolioPhotos) ? tradesman.portfolioPhotos : [];
+        previous.forEach((key) => staleFiles.push({ key, category: "portfolio" }));
+      }
 
-    if (portfolioFiles.length > 0) {
-      const previousPortfolioPhotos = Array.isArray(tradesman.portfolioPhotos)
-        ? [...tradesman.portfolioPhotos]
-        : [];
+      /* ---------- 3. one transaction for every row ---------- */
 
-      tradesman.portfolioPhotos = await storageService.saveMultipleImages({
-        files: portfolioFiles,
-        category: "portfolio",
+      await sequelize.transaction(async (transaction) => {
+        const userChanges = { profileImage: nextProfileImage };
+        if (name !== undefined) userChanges.name = name;
+        if (mobile !== undefined) userChanges.mobile = mobile;
+        await user.update(userChanges, { transaction });
+
+        const detailChanges = { portfolioPhotos: nextPortfolio };
+        if (newTrade) {
+          detailChanges.tradeTypeId = newTrade.id;
+          detailChanges.tradeType = newTrade.name;
+        }
+        if (businessName !== undefined) detailChanges.businessName = businessName;
+        if (shortBio !== undefined) detailChanges.shortBio = shortBio;
+        if (portfolioDescription !== undefined) detailChanges.portfolioDescription = portfolioDescription;
+        if (tradeChanged) detailChanges.licenceVerified = false; // a licence belongs to one trade
+
+        if (switchingToLicensed) {
+          detailChanges.licenseNumber = licence.number;
+          detailChanges.licenseExpiry = licence.expiry;
+          detailChanges.licenseDocument = nextLicenceDocument;
+        } else if (!licenceLocked) {
+          // Unlicensed trade: licence details are optional information.
+          if (licenseNumber !== undefined) detailChanges.licenseNumber = licence.number;
+          if (licenseExpiry !== undefined) detailChanges.licenseExpiry = licence.expiry;
+          if (licenseDocFile) detailChanges.licenseDocument = nextLicenceDocument;
+        }
+
+        await tradesman.update(detailChanges, { transaction });
+
+        // New licence-required trade: back to "waiting for an admin", whatever it was before.
+        if (switchingToLicensed) {
+          await applyVerificationState(tradesman, user, "pending", { transaction });
+        }
       });
-
-      await storageService.deleteObjects(previousPortfolioPhotos, {
-        category: "portfolio",
-      });
+    } catch (saveError) {
+      await Promise.all(
+        newFiles.map(({ key, category }) => storageService.deleteObject(key, { category }).catch(() => {})),
+      );
+      throw saveError;
     }
 
-    await tradesman.save();
+    await Promise.all(
+      staleFiles.map(({ key, category }) =>
+        storageService.deleteObject(key, { category }).catch((deleteError) =>
+          console.error("Profile update cleanup failed:", key, deleteError.message),
+        ),
+      ),
+    );
 
-    /* ================= FINAL RESPONSE ================= */
+    /* ---------- 4. what happens next (nothing here can fail the request) ---------- */
+
+    if (tradeChanged && !switchingToLicensed) {
+      // An unlicensed trade has nothing to check: if they already pay, they are listed straight away.
+      try {
+        await autoApproveIfUnlicensed(userId);
+        await tradesman.reload();
+        await user.reload();
+      } catch (error) {
+        console.error("Auto-approval after trade change failed:", error.message);
+      }
+    }
+    if (switchingToLicensed) {
+      // Paying members now wait in the admins' review queue: tell them (never throws).
+      const subscribed = await UserSubscription.findOne({ where: buildAccessibleSubscriptionWhere(userId) });
+      if (subscribed) notifyAdminsTradesmanNeedsVerification({ userId });
+    }
+
+    const trade = effectiveTrade;
     return sendResponse(res, 200, true, "Profile updated successfully", {
       user: {
         id: user.id,
@@ -2410,6 +2612,9 @@ exports.updateTradesmanProfile = async (req, res) => {
         isApproved: tradesman.isApproved,
         verificationStatus: tradesman.verificationStatus,
         rejectionReason: tradesman.rejectionReason,
+        licenceRequired: Boolean(trade && trade.licenceRequired),
+        licenceLabel: trade ? trade.licenceLabel : null,
+        licenceVerified: Boolean(tradesman.licenceVerified),
       },
     });
   } catch (error) {
@@ -2467,33 +2672,53 @@ exports.resubmitTradesmanVerification = async (req, res) => {
     const profileImageFile = req.files?.profileImage?.[0] || null;
     const portfolioFiles = req.files?.portfolioPhotos || [];
 
+    // Resolve the trade first: it decides whether a licence is needed (the server, not the app, is the authority).
+    let tradeRecord = null;
     if (tradeTypeId !== undefined) {
-      const tradeRecord = await TradesType.findOne({
+      tradeRecord = await TradesType.findOne({
         where: { id: Number(tradeTypeId), isActive: true },
       });
       if (!tradeRecord) return sendResponse(res, 400, false, "Invalid tradeTypeId");
-      tradesman.tradeTypeId = Number(tradeTypeId);
+      tradesman.tradeTypeId = tradeRecord.id;
       tradesman.tradeType = tradeRecord.name;
-    } else if (tradeType !== undefined) {
-      tradesman.tradeType = tradeType;
+    } else {
+      if (tradeType !== undefined) tradesman.tradeType = tradeType;
+      tradeRecord = tradesman.tradeTypeId ? await TradesType.findByPk(tradesman.tradeTypeId) : null;
     }
+    const licenceRequired = Boolean(tradeRecord && tradeRecord.licenceRequired);
+
     if (businessName !== undefined) tradesman.businessName = businessName;
     if (shortBio !== undefined) tradesman.shortBio = shortBio;
-    if (licenseNumber !== undefined) tradesman.licenseNumber = licenseNumber;
-    if (licenseExpiry !== undefined) tradesman.licenseExpiry = licenseExpiry;
+    if (licenseNumber !== undefined) tradesman.licenseNumber = normalizeOptionalText(licenseNumber);
+    if (licenseExpiry !== undefined) {
+      const parsedExpiry = parseLicenceInput({ expiry: licenseExpiry });
+      if (parsedExpiry.expiryInvalid) {
+        return sendResponse(res, 400, false, "licenseExpiry must be a valid date");
+      }
+      tradesman.licenseExpiry = parsedExpiry.expiry;
+    }
     if (portfolioDescription !== undefined) {
-      tradesman.portfolioDescription = portfolioDescription;
+      tradesman.portfolioDescription = normalizeOptionalText(portfolioDescription);
     }
 
     // Validate the merged profile before touching storage.
-    const missingFields = validateApprovalReadiness({
-      ...tradesman.toJSON(),
-      licenseDocument: licenseDocFile ? "pending-upload" : tradesman.licenseDocument,
-      portfolioPhotos:
-        portfolioFiles.length > 0 ? portfolioFiles : tradesman.portfolioPhotos,
-    });
+    const missingFields = checkReadiness(
+      {
+        ...tradesman.toJSON(),
+        licenseDocument: licenseDocFile ? "pending-upload" : tradesman.licenseDocument,
+      },
+      {
+        licenceRequired,
+        profileImage: profileImageFile ? "pending-upload" : user.profileImage,
+      },
+    );
     if (missingFields.length) {
-      return sendResponse(res, 400, false, "Profile is incomplete", { missingFields });
+      return sendResponse(res, 400, false, "Profile is incomplete", {
+        code: licenceRequired ? "LICENCE_REQUIRED" : undefined,
+        licenceRequired,
+        licenceLabel: tradeRecord ? tradeRecord.licenceLabel : null,
+        missingFields,
+      });
     }
 
     const previousReason = tradesman.rejectionReason;
@@ -2545,14 +2770,12 @@ exports.resubmitTradesmanVerification = async (req, res) => {
         }
       }
 
-      tradesman.verificationStatus = "resubmitted";
-      tradesman.resubmittedAt = new Date();
-      tradesman.isApproved = false;
       // rejectionReason is kept so the admin sees what was previously flagged.
-      await tradesman.save();
-
-      user.isVerified = false;
-      await user.save();
+      await sequelize.transaction(async (transaction) => {
+        await tradesman.save({ transaction });
+        await user.save({ transaction });
+        await applyVerificationState(tradesman, user, "resubmitted", { transaction });
+      });
     } catch (saveError) {
       await Promise.all(
         newFiles.map(({ key, category }) =>
@@ -2570,12 +2793,22 @@ exports.resubmitTradesmanVerification = async (req, res) => {
       )
     );
 
-    // Fire-and-forget; never throws.
-    notifyAdminsTradesmanNeedsVerification({
-      userId,
-      isResubmission: true,
-      previousReason,
-    });
+    if (licenceRequired) {
+      // Fire-and-forget; never throws.
+      notifyAdminsTradesmanNeedsVerification({
+        userId,
+        isResubmission: true,
+        previousReason,
+      });
+    } else {
+      // Nothing for an admin to check on an unlicensed trade: they are paying, so list them straight away.
+      try {
+        await autoApproveIfUnlicensed(userId);
+        await tradesman.reload();
+      } catch (error) {
+        console.error("Auto-approval after resubmit failed:", error.message);
+      }
+    }
 
     return sendResponse(res, 200, true, "Profile resubmitted for approval", {
       verificationStatus: tradesman.verificationStatus,
@@ -2599,6 +2832,7 @@ exports.filterNearbyTradesmen = async (req, res) => {
       tradeType,
       minRating = 0,
       onlyVerified = true,
+      licenceVerifiedOnly = false,
       availability = "open",
     } = req.body;
 
@@ -2645,6 +2879,7 @@ exports.filterNearbyTradesmen = async (req, res) => {
 
     const tradesmanWhere = {
       ...(onlyVerified && { isApproved: true }),
+      ...(isTruthyFlag(licenceVerifiedOnly) && { licenceVerified: true }),
     };
 
     if (
@@ -2657,8 +2892,9 @@ exports.filterNearbyTradesmen = async (req, res) => {
       tradesmanWhere.tradeType = tradeType;
     }
 
+    // Test tradesmen are only shown to test users, and real tradesmen only to real users.
     const tradesmen = await User.findAll({
-      where: { role: "tradesman" },
+      where: { role: "tradesman", ...worldWhere(await getRequesterWorld(req)) },
       attributes: ["id", "name", "profileImage"],
 
       include: [
@@ -2687,6 +2923,8 @@ exports.filterNearbyTradesmen = async (req, res) => {
       order: [[literal(distanceSQL), "ASC"]],
     });
 
+    const nearbyTradeMap = await getTradeLicenceMap(tradesmen.map((row) => row.TradesmanDetail?.tradeTypeId));
+
     const result = await Promise.all(
       tradesmen.map(async (t) => {
         const ratingAgg = await Review.findOne({
@@ -2709,6 +2947,7 @@ exports.filterNearbyTradesmen = async (req, res) => {
           tradeTypeId: t.TradesmanDetail?.tradeTypeId || null,
           tradeType: t.TradesmanDetail?.tradeType || null,
           businessName: t.TradesmanDetail?.businessName || null,
+          ...toPublicLicenceInfo(t.TradesmanDetail, nearbyTradeMap),
           rating: rating.toFixed(1),
           reviewCount: ratingAgg?.reviewCount || 0,
           distance: Number(t.travelPlans[0].get("distance")).toFixed(2),

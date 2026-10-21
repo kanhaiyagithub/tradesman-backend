@@ -62,6 +62,7 @@ router.put(
   verifyToken,
   upload.fields([
     { name: "profileImage", maxCount: 1 },
+    { name: "licenseDocument", maxCount: 1 },
     { name: "portfolioPhotos", maxCount: 10 },
   ]),
   userController.updateTradesmanProfile

@@ -7,6 +7,7 @@ const SubscriptionPlan = require("../models/SubscriptionPlan");
 const { SUBSCRIPTION_PLAN_NAMES } = require("../config/subscriptionPlans");
 const UserSubscription = require("../models/UserSubscription");
 const User = require("../models/User");
+const { handleTradesmanSubscribed } = require("../services/subscriptionApprovalService");
 const {
   sendSubscriptionCancelScheduledEmail,
   sendSubscriptionEndedEmail,
@@ -874,6 +875,9 @@ exports.createMobileSubscription = async (req, res) => {
       !!stripeSubscription.cancel_at_period_end;
 
     await localSubscription.save();
+
+    // Do not depend on a Stripe webhook arriving: approve (no licence needed) or alert the admins (licence needed).
+    await handleTradesmanSubscribed(userId);
 
     return sendResponse(
       res,

@@ -82,6 +82,18 @@ const TradesmanDetails = sequelize.define(
     portfolioPhotos: {
       type: DataTypes.JSON,
       allowNull: true,
+      // On MySQL/MariaDB setups where JSON is stored as text the driver hands back a string, which every
+      // "is it a list?" check then treats as empty (the app showed no work photos). Always return a list.
+      get() {
+        const value = this.getDataValue("portfolioPhotos");
+        if (typeof value !== "string") return value;
+        try {
+          const parsed = JSON.parse(value);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      },
     },
 
     portfolioDescription: {
@@ -126,6 +138,14 @@ const TradesmanDetails = sequelize.define(
     resubmittedAt: {
       type: DataTypes.DATE,
       allowNull: true,
+    },
+
+    // True only when an admin approved the licence of a licence-required trade. Unlicensed tradespeople
+    // can be approved (listed) without it. Always change it through services/verificationStateService.js.
+    licenceVerified: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
     },
   },
   {

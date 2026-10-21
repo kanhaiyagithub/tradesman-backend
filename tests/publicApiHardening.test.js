@@ -43,12 +43,14 @@ const {
 } = require("../services/travelAlertService");
 const liveLocationService = require("../services/liveLocationService");
 const TradesmanDetails = require("../models/TradesmanDetails");
+const TradesType = require("../models/tradesTypeModel");
 const clientBookingController = require("../controllers/clientBookingController");
 const { verifyToken } = require("../middlewares/authMiddleware");
 const socketModule = require("../socket");
 const { passwordFingerprint, signRefreshToken } = require("../utils/authTokens");
 
 const saved = {
+  tradesFindAll: TradesType.findAll,
   userFindAndCountAll: User.findAndCountAll,
   userFindAll: User.findAll,
   userFindOne: User.findOne,
@@ -69,9 +71,12 @@ const saved = {
 
 test.beforeEach(() => {
   console.error = () => {};
+  // These tests run without a database; the trade licence lookup is the only extra query the profile shape makes.
+  TradesType.findAll = async () => [];
 });
 
 test.afterEach(() => {
+  TradesType.findAll = saved.tradesFindAll;
   User.findAndCountAll = saved.userFindAndCountAll;
   User.findAll = saved.userFindAll;
   User.findOne = saved.userFindOne;
@@ -210,10 +215,11 @@ test("getAllUsers returns only the public profile shape and does not search emai
   assert.equal(tradesman.tradeType, "Plumber");
   assert.equal(tradesman.avgRating, 4.5);
   assert.equal(tradesman.reviewCount, 2);
-  assert.equal(tradesman.isVerified, true);
+  assert.equal(tradesman.isVerified, tradesman.licenceVerified, "the tick means licence verified");
 
-  // search matches the name only
-  assert.deepEqual(Object.keys(queryOptions.where), ["name"]);
+  // search matches the name only (never email or mobile); anonymous callers only see real users
+  assert.deepEqual(Object.keys(queryOptions.where).sort(), ["isDummy", "name"]);
+  assert.equal(queryOptions.where.isDummy, false);
   assert.deepEqual(queryOptions.attributes, ["id", "name", "role", "profileImage"]);
 });
 
@@ -232,7 +238,8 @@ test("getAllTradesmen lists approved tradesmen only, with the public shape", asy
   assert.equal(include.where.isApproved, true);
   assert.equal(include.where.tradeType, "Plumber");
   assert.equal(include.required, true, "users without approved details must not be listed");
-  assert.deepEqual(Object.keys(queryOptions.where), ["role", "name"]);
+  assert.deepEqual(Object.keys(queryOptions.where).sort(), ["isDummy", "name", "role"]);
+  assert.equal(queryOptions.where.isDummy, false, "anonymous callers only see real tradesmen");
 
   assert.equal(response.statusCode, 200);
   assertNoSensitiveFields(response.body);
