@@ -8,7 +8,7 @@ const TradesType = require("../models/tradesTypeModel");
 const storageService = require("../services/storage/storageService");
 const {
   cancelUserStripeSubscriptions,
-  deleteUserFiles,
+  deleteUserAccount,
 } = require("../services/accountDeletionService");
 const UserSubscription = require("../models/UserSubscription");
 const { buildAccessibleSubscriptionWhere } = require("../services/subscriptionAccessService");
@@ -1282,8 +1282,11 @@ exports.deleteUser = async (req, res) => {
       );
     }
 
-    await deleteUserFiles(user);
-    await user.destroy();
+    // Rows first (one transaction), files after: a failure leaves the account untouched.
+    const { sweptTables } = await deleteUserAccount(user);
+    if (sweptTables.length) {
+      console.warn("Delete account: also cleared rows in unexpected tables:", sweptTables.join(", "));
+    }
     return sendResponse(res, 200, true, "User deleted successfully");
   } catch (error) {
     console.error("Delete Error:", error);
