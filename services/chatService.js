@@ -495,7 +495,12 @@ const getConversationMessages = async ({
   }
 
   const requestedLimit = usingCursor ? cursorPagination.limit : offsetPagination.limit;
-  const hasMore = rows.length > requestedLimit;
+  // Cursor mode fetches one extra row to know; page mode only ever returns up to
+  // `limit` rows, so compare against the total instead (otherwise the first page
+  // of a long conversation would always say there is nothing older).
+  const hasMore = usingCursor
+    ? rows.length > requestedLimit
+    : offsetPagination.offset + rows.length < total;
   const trimmedRows = hasMore ? rows.slice(0, requestedLimit) : rows;
   const orderedRows = [...trimmedRows].reverse();
 
