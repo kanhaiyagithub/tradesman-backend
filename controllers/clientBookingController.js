@@ -100,6 +100,7 @@ exports.getClientBookings = async (req, res) => {
             }
           : null,
         status: job.status,
+        requestCompletion: Boolean(job.requestCompletion),
         jobDescription: job.jobDescription,
         createdAt: job.createdAt,
         canReview: job.status === "completed" && !review,
