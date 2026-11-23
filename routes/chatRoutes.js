@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const chatController = require('../controllers/chatController');
 const { verifyToken } = require('../middlewares/authMiddleware');
+const { chatMessageRateLimiter } = require('../middlewares/rateLimitMiddleware');
 
 /**
  * Send a message
@@ -11,6 +12,7 @@ const { verifyToken } = require('../middlewares/authMiddleware');
 router.post(
   '/send',
   verifyToken,
+  chatMessageRateLimiter,
   chatController.sendMessage
 );
 

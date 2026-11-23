@@ -992,7 +992,7 @@ test("auth failures return one consistent 401 body with a code", () => {
   assert.equal(missing.response.body.code, "TOKEN_MISSING");
   assert.equal(missing.response.body.success, false);
 
-  const expiredToken = jwt.sign({ id: 1, role: "client" }, process.env.JWT_SECRET, { expiresIn: -10 });
+  const expiredToken = jwt.sign({ id: 1, role: "client", type: "access" }, require("../utils/authTokens").getAccessSecret(), { expiresIn: -10 });
   const expired = runVerifyToken(`Bearer ${expiredToken}`);
   assert.equal(expired.response.statusCode, 401);
   assert.equal(expired.response.body.code, "TOKEN_EXPIRED");
@@ -1012,7 +1012,7 @@ test("auth failures return one consistent 401 body with a code", () => {
 });
 
 test("a valid access token passes and a refresh token is rejected as an access token", () => {
-  const access = jwt.sign({ id: 1, role: "client" }, process.env.JWT_SECRET, { expiresIn: "1h" });
+  const access = jwt.sign({ id: 1, role: "client", type: "access" }, require("../utils/authTokens").getAccessSecret(), { expiresIn: "1h" });
   const ok = runVerifyToken(`Bearer ${access}`);
   assert.equal(ok.nextCalled, true);
 
@@ -1032,10 +1032,10 @@ test("a refresh token can be exchanged for new tokens", async () => {
 
   assert.equal(response.statusCode, 200);
   const { token, refreshToken } = response.body.data;
-  const decodedAccess = jwt.verify(token, process.env.JWT_SECRET);
+  const decodedAccess = jwt.verify(token, require("../utils/authTokens").getAccessSecret());
   assert.equal(decodedAccess.id, 3);
-  assert.equal(decodedAccess.type, undefined);
-  assert.equal(jwt.verify(refreshToken, process.env.JWT_SECRET).type, "refresh");
+  assert.equal(decodedAccess.type, "access");
+  assert.equal(jwt.verify(refreshToken, require("../utils/authTokens").getRefreshSecret()).type, "refresh");
   assert.equal(response.body.data.user.email, "sam@example.com");
 });
 
@@ -1049,12 +1049,12 @@ test("refresh fails for an expired token, an access token, junk, or after a pass
     return response;
   };
 
-  const expired = jwt.sign({ id: 3, type: "refresh", pv: passwordFingerprint(user) }, process.env.JWT_SECRET, { expiresIn: -10 });
+  const expired = jwt.sign({ id: 3, type: "refresh", pv: passwordFingerprint(user) }, require("../utils/authTokens").getRefreshSecret(), { expiresIn: -10 });
   let response = await attempt(expired);
   assert.equal(response.statusCode, 401);
   assert.equal(response.body.code, "TOKEN_EXPIRED");
 
-  const access = jwt.sign({ id: 3, role: "client" }, process.env.JWT_SECRET, { expiresIn: "1h" });
+  const access = jwt.sign({ id: 3, role: "client", type: "access" }, require("../utils/authTokens").getAccessSecret(), { expiresIn: "1h" });
   response = await attempt(access);
   assert.equal(response.statusCode, 401);
   assert.equal(response.body.code, "TOKEN_INVALID");
@@ -1124,4 +1124,19 @@ test("app.js no longer contains a default session secret", () => {
   const source = fs.readFileSync(path.join(__dirname, "../app.js"), "utf8");
 
   assert.equal(source.includes("your_secret_key"), false);
+});
+
+test("admin tokens and untyped tokens are rejected as user access tokens, and user tokens as admin tokens", () => {
+  const { signAdminToken, signAccessToken, verifyAdminJwt, verifyAccessToken } = require("../utils/authTokens");
+
+  const admin = runVerifyToken(`Bearer ${signAdminToken({ id: 1 })}`);
+  assert.equal(admin.nextCalled, false);
+  assert.equal(admin.response.statusCode, 401);
+
+  const untyped = runVerifyToken(`Bearer ${jwt.sign({ id: 1, role: "client" }, process.env.JWT_SECRET)}`);
+  assert.equal(untyped.nextCalled, false);
+
+  const userToken = signAccessToken({ id: 1, email: "a@b.co", role: "client" });
+  assert.throws(() => verifyAdminJwt(userToken));
+  assert.equal(verifyAccessToken(userToken).id, 1);
 });

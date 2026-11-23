@@ -18,6 +18,7 @@ const {
 const metaConversionService = require("../services/metaConversionService");
 const {
   passwordFingerprint,
+  signAccessToken,
   signRefreshToken,
   verifyRefreshToken,
 } = require("../utils/authTokens");
@@ -37,7 +38,6 @@ const MAX_FILTER_RADIUS_KM = 100;
 const MAX_FILTER_PAGE_SIZE = 100;
 
 const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 const { Op, fn, col, literal } = require("sequelize");
 const sequelize = require("../config/db");
 const crypto = require("crypto");
@@ -248,13 +248,7 @@ const getUserReceivedReviewSummary = async (userId) => {
   };
 };
 
-const signToken = (user) => {
-  return jwt.sign(
-    { id: user.id, email: user.email, role: user.role },
-    process.env.JWT_SECRET,
-    { expiresIn: "7d" },
-  );
-};
+const signToken = signAccessToken;
 
 /**
  * POST /api/users/refresh-token
@@ -318,6 +312,8 @@ exports.refreshToken = async (req, res) => {
 
 const PASSWORD_RESET_OTP_TTL_MS = 10 * 60 * 1000;
 const PASSWORD_RESET_TOKEN_TTL_MS = 15 * 60 * 1000;
+const PASSWORD_RESET_RESEND_COOLDOWN_MS = 60 * 1000;
+const PASSWORD_RESET_MAX_OTP_ATTEMPTS = 5;
 const PASSWORD_RESET_OTP_PREFIX = "otp:";
 const PASSWORD_RESET_TOKEN_PREFIX = "reset:";
 
@@ -550,7 +546,6 @@ exports.register = async (req, res) => {
   try {
     const {
       name,
-      email,
       mobile,
       password,
       role, // "tradesman" | "client"
@@ -564,6 +559,7 @@ exports.register = async (req, res) => {
       licenseExpiry,
       portfolioDescription,
     } = req.body;
+    const email = normalizeEmail(req.body.email);
 
     // 👇 Files from multer
     const profileImageFile = req.files?.profileImage?.[0] || null;
@@ -774,7 +770,8 @@ exports.register = async (req, res) => {
 
 exports.login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { password } = req.body;
+    const email = normalizeEmail(req.body.email);
 
     const user = await User.findOne({ where: { email } });
     if (!user) {
@@ -1165,9 +1162,7 @@ exports.updateProfile = async (req, res) => {
 
     const {
       name,
-      email,
       mobile,
-      password,
       tradeType,
       tradeTypeId,
       businessName,
@@ -1177,13 +1172,10 @@ exports.updateProfile = async (req, res) => {
     } = req.body;
 
     // -------- USERS TABLE (OPTIONAL FIELDS) --------
+    // Email and password are deliberately not editable here: a stolen token must not be
+    // able to lock the owner out. Passwords change at /change-password (old password required).
     if (name !== undefined) user.name = name;
-    if (email !== undefined) user.email = email;
     if (mobile !== undefined) user.mobile = mobile;
-
-    if (password) {
-      user.password = await bcrypt.hash(password, 10);
-    }
 
     // 🖼 PROFILE IMAGE (OPTIONAL)
     if (req.file) {
@@ -1306,12 +1298,24 @@ exports.forgotPassword = async (req, res) => {
     const user = await User.findOne({ where: { email } });
     if (!user) return sendResponse(res, 200, true, genericMessage);
 
+    // One reset email per account per cooldown: the OTP was issued at expires - TTL.
+    const issuedAt = user.resetPasswordExpires
+      ? new Date(user.resetPasswordExpires).getTime() - PASSWORD_RESET_OTP_TTL_MS
+      : 0;
+    if (
+      String(user.resetPasswordToken || "").startsWith(PASSWORD_RESET_OTP_PREFIX) &&
+      Date.now() - issuedAt < PASSWORD_RESET_RESEND_COOLDOWN_MS
+    ) {
+      return sendResponse(res, 200, true, genericMessage);
+    }
+
     const otp = generatePasswordResetOtp();
     const expiry = new Date(Date.now() + PASSWORD_RESET_OTP_TTL_MS);
 
     await user.update({
       resetPasswordToken: `${PASSWORD_RESET_OTP_PREFIX}${hashPasswordResetSecret(otp)}`,
       resetPasswordExpires: expiry,
+      resetPasswordAttempts: 0,
     });
 
     const emailContent = buildPasswordResetOtpEmail({
@@ -1350,18 +1354,30 @@ exports.verifyResetOtp = async (req, res) => {
     const user = await User.findOne({
       where: {
         email,
-        resetPasswordToken: `${PASSWORD_RESET_OTP_PREFIX}${hashPasswordResetSecret(otp)}`,
+        resetPasswordToken: { [Op.like]: `${PASSWORD_RESET_OTP_PREFIX}%` },
         resetPasswordExpires: { [Op.gt]: new Date() },
       },
     });
 
     if (!user) return sendResponse(res, 400, false, "Invalid or expired OTP");
 
+    if (user.resetPasswordToken !== `${PASSWORD_RESET_OTP_PREFIX}${hashPasswordResetSecret(otp)}`) {
+      // Each code allows a few wrong guesses, then it is invalidated.
+      const attempts = Number(user.resetPasswordAttempts || 0) + 1;
+      await user.update(
+        attempts >= PASSWORD_RESET_MAX_OTP_ATTEMPTS
+          ? { resetPasswordToken: null, resetPasswordExpires: null, resetPasswordAttempts: 0 }
+          : { resetPasswordAttempts: attempts }
+      );
+      return sendResponse(res, 400, false, "Invalid or expired OTP");
+    }
+
     const resetToken = crypto.randomBytes(32).toString("hex");
 
     await user.update({
-      resetPasswordToken: `${PASSWORD_RESET_TOKEN_PREFIX}${resetToken}`,
+      resetPasswordToken: `${PASSWORD_RESET_TOKEN_PREFIX}${hashPasswordResetSecret(resetToken)}`,
       resetPasswordExpires: new Date(Date.now() + PASSWORD_RESET_TOKEN_TTL_MS),
+      resetPasswordAttempts: 0,
     });
 
     return sendResponse(res, 200, true, "OTP verified", {
@@ -1391,9 +1407,7 @@ exports.resetPassword = async (req, res) => {
 
     const user = await User.findOne({
       where: {
-        resetPasswordToken: {
-          [Op.in]: [token, `${PASSWORD_RESET_TOKEN_PREFIX}${token}`],
-        },
+        resetPasswordToken: `${PASSWORD_RESET_TOKEN_PREFIX}${hashPasswordResetSecret(token)}`,
         resetPasswordExpires: { [Op.gt]: new Date() },
       },
     });
@@ -1406,6 +1420,7 @@ exports.resetPassword = async (req, res) => {
       password: hashed,
       resetPasswordToken: null,
       resetPasswordExpires: null,
+      resetPasswordAttempts: 0,
     });
 
     return sendResponse(res, 200, true, "Password reset successful");
@@ -1426,7 +1441,17 @@ exports.changePassword = async (req, res) => {
     if (newPassword !== confirmNewPassword)
       return sendResponse(res, 400, false, "New password mismatch");
 
+    if (typeof newPassword !== "string" || newPassword.length < 8) {
+      return sendResponse(res, 400, false, "New password must be at least 8 characters");
+    }
+
     const user = await User.findByPk(userId);
+    if (!user) return sendResponse(res, 404, false, "User not found");
+
+    // Google accounts have no password to change.
+    if (!user.password) {
+      return sendResponse(res, 400, false, "This account signs in with Google and has no password");
+    }
 
     const isMatch = await bcrypt.compare(oldPassword, user.password);
     if (!isMatch)

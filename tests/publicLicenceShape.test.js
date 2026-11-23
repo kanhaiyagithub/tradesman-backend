@@ -86,7 +86,7 @@ test.before(async () => {
     provider: "manual",
   });
   userIds.push(viewer.id);
-  viewerToken = jwt.sign({ id: viewer.id, email: viewer.email, role: "client" }, process.env.JWT_SECRET);
+  viewerToken = jwt.sign({ id: viewer.id, email: viewer.email, role: "client", type: "access" }, require("../utils/authTokens").getAccessSecret());
 
   server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -186,7 +186,7 @@ test("/api/trades tells the app which trades need a licence", async () => {
 });
 
 test("/me shows the owner's own licence state", async () => {
-  const token = jwt.sign({ id: people.verified.id, email: people.verified.email, role: "tradesman" }, process.env.JWT_SECRET);
+  const token = jwt.sign({ id: people.verified.id, email: people.verified.email, role: "tradesman", type: "access" }, require("../utils/authTokens").getAccessSecret());
   const me = (await get("/api/users/me", token)).body.data;
   assert.equal(me.licenceRequired, true);
   assert.equal(me.licenceVerified, true);

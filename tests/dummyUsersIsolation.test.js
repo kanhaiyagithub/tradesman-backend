@@ -39,7 +39,7 @@ const planIds = [];
 const alertIds = [];
 
 const tokenFor = (user) =>
-  jwt.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET, { expiresIn: "1h" });
+  jwt.sign({ id: user.id, email: user.email, role: user.role, type: "access" }, require("../utils/authTokens").getAccessSecret(), { expiresIn: "1h" });
 
 const call = async (method, path, { as, body } = {}) => {
   const headers = { "Content-Type": "application/json" };
@@ -181,7 +181,7 @@ test("the tradesman list shows each world only its own tradesmen (anonymous call
   assert.ok(!names(asDummy.body).includes("real-tradesman"));
 
   // An admin token sees both (admins manage test users too).
-  const adminToken = jwt.sign({ id: 999999, role: "admin" }, process.env.JWT_SECRET);
+  const adminToken = jwt.sign({ id: 999999, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret());
   const asAdmin = await call("GET", path, { as: adminToken });
   assert.ok(names(asAdmin.body).includes("real-tradesman") && names(asAdmin.body).includes("dummy-tradesman"));
   assert.ok(realTradesman && dummyTradesman);

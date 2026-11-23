@@ -1,8 +1,7 @@
-const jwt = require('jsonwebtoken');
 const User = require("../models/User");
 const https = require("https");
 const metaConversionService = require("../services/metaConversionService");
-const { signRefreshToken } = require("../utils/authTokens");
+const { signAccessToken, signRefreshToken } = require("../utils/authTokens");
 
 const fetchJson = (url) =>
   new Promise((resolve, reject) => {
@@ -67,7 +66,12 @@ const verifyGoogleIdToken = async (idToken) => {
 
   const allowedClientIds = getAllowedGoogleClientIds();
 
-  if (allowedClientIds.length && !allowedClientIds.includes(tokenInfo.aud)) {
+  // Never skip the audience check: without a configured client ID any Google ID token would pass.
+  if (!allowedClientIds.length) {
+    throw new Error("Google sign-in is not configured");
+  }
+
+  if (!allowedClientIds.includes(tokenInfo.aud)) {
     throw new Error("Google token audience mismatch");
   }
 
@@ -94,17 +98,14 @@ exports.googleCallback = async (req, res) => {
       });
     }
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
+    const token = signAccessToken(user);
 
     return res.status(200).json({
       success: true,
       message: "Google signup/login successful",
       data: {
         token,
+        refreshToken: signRefreshToken(user),
         user: {
           id: user.id,
           name: user.name,
@@ -165,7 +166,12 @@ exports.googleMobileLogin = async (req, res) => {
       const changedFields = {};
 
       if (!user.googleId && googleProfile.sub) changedFields.googleId = googleProfile.sub;
-      if (user.provider !== "google") changedFields.provider = "google";
+      if (user.provider !== "google") {
+        changedFields.provider = "google";
+        // Linking: drop any password set before Google proved ownership of the email, so a
+        // squatter who pre-registered this address cannot keep signing in with it.
+        changedFields.password = null;
+      }
       if (!user.isVerified) changedFields.isVerified = true;
       if (!user.profileImage && googleProfile.picture) {
         changedFields.profileImage = googleProfile.picture;
@@ -184,11 +190,7 @@ exports.googleMobileLogin = async (req, res) => {
       });
     }
 
-    const jwtToken = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
+    const jwtToken = signAccessToken(user);
 
     return res.status(200).json({
       success: true,

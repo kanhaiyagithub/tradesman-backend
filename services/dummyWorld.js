@@ -1,4 +1,4 @@
-const jwt = require("jsonwebtoken");
+const { verifyAccessToken, verifyAdminJwt } = require("../utils/authTokens");
 const User = require("../models/User");
 
 /**
@@ -14,8 +14,12 @@ const decodeOptionalToken = (req) => {
   const header = req?.headers?.authorization;
   if (!header || !header.startsWith("Bearer ")) return null;
   try {
-    const decoded = jwt.verify(header.split(" ")[1], process.env.JWT_SECRET);
-    return decoded && decoded.type !== "refresh" ? decoded : null;
+    const token = header.split(" ")[1];
+    try {
+      return verifyAccessToken(token);
+    } catch {
+      return verifyAdminJwt(token);
+    }
   } catch {
     return null;
   }

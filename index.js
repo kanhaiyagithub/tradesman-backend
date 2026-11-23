@@ -34,5 +34,15 @@ const stopBackgroundJobs = () => {
   }
 };
 
+// A forgotten await or promise must not take the API down silently or leave it half-working.
+process.on('unhandledRejection', (reason) => {
+  console.error('[UNHANDLED REJECTION]', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('[UNCAUGHT EXCEPTION]', error);
+  stopBackgroundJobs();
+  process.exit(1);
+});
+
 process.on('SIGINT', stopBackgroundJobs);
 process.on('SIGTERM', stopBackgroundJobs);

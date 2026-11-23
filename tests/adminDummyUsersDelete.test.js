@@ -156,7 +156,7 @@ test.before(async () => {
     email: `delete-admin-${suffix}@test.com`,
     password: await bcrypt.hash(ADMIN_PASSWORD, 10),
   });
-  token = jwt.sign({ id: admin.id, role: "admin" }, process.env.JWT_SECRET, { expiresIn: "1h" });
+  token = jwt.sign({ id: admin.id, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret(), { expiresIn: "1h" });
 
   trade = await TradesType.create({ name: `${TAG} Trade`, category: "Test", isActive: true, licenceRequired: true });
   if ((await SubscriptionPlan.count()) === 0) {

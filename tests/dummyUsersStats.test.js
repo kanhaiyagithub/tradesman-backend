@@ -89,7 +89,7 @@ test.before(async () => {
     email: `dummy-stats-admin-${suffix}@test.com`,
     password: await bcrypt.hash("Password123!", 10),
   });
-  token = jwt.sign({ id: admin.id, role: "admin" }, process.env.JWT_SECRET, { expiresIn: "1h" });
+  token = jwt.sign({ id: admin.id, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret(), { expiresIn: "1h" });
 
   plan = await SubscriptionPlan.create({
     name: `${TAG} Plan`,

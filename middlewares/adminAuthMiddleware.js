@@ -1,4 +1,4 @@
-const jwt = require("jsonwebtoken");
+const { verifyAdminJwt } = require("../utils/authTokens");
 const Admin = require("../models/AdminModel/adminModel");
 
 exports.verifyAdminToken = async (req, res, next) => {
@@ -9,7 +9,7 @@ exports.verifyAdminToken = async (req, res, next) => {
     }
 
     const token = auth.split(" ")[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = verifyAdminJwt(token);
 
     const admin = await Admin.findByPk(decoded.id);
     if (!admin) {

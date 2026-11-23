@@ -99,7 +99,7 @@ const register = async (trade, { fields = {}, files = { profileImage: true } } =
 
 const detailsOf = (userId) => TradesmanDetails.findOne({ where: { userId } });
 
-const tokenFor = (user) => jwt.sign({ id: user.id, email: user.email, role: "tradesman" }, process.env.JWT_SECRET);
+const tokenFor = (user) => jwt.sign({ id: user.id, email: user.email, role: "tradesman", type: "access" }, require("../utils/authTokens").getAccessSecret());
 
 const subscribe = async (userId) => {
   const stripeId = `sub_${TAG}_${userId}`;
@@ -133,7 +133,7 @@ test.before(async () => {
     password: await bcrypt.hash("Password123!", 10),
   });
   adminIds.push(admin.id);
-  adminToken = jwt.sign({ id: admin.id, role: "admin" }, process.env.JWT_SECRET);
+  adminToken = jwt.sign({ id: admin.id, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret());
 
   licensed = await TradesType.create({ name: `${TAG} Licensed`, category: `${TAG} Cat`, isActive: true, licenceRequired: true, licenceLabel: `${TAG} licence` });
   plain = await TradesType.create({ name: `${TAG} Plain`, category: `${TAG} Cat`, isActive: true, licenceRequired: false });

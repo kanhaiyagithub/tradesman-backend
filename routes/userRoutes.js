@@ -10,7 +10,11 @@ const {
 } = require('../middlewares/accountPasswordMiddleware');
 const {
   authRateLimiter,
+  loginRateLimiter,
+  loginAccountRateLimiter,
+  refreshRateLimiter,
   passwordResetRateLimiter,
+  passwordResetEmailRateLimiter,
 } = require('../middlewares/rateLimitMiddleware');
 
 // Public Routes
@@ -26,8 +30,8 @@ router.post(
   userController.register
 );
 
-router.post('/login', authRateLimiter, userController.login);
-router.post('/refresh-token', authRateLimiter, userController.refreshToken);
+router.post('/login', loginRateLimiter, loginAccountRateLimiter, userController.login);
+router.post('/refresh-token', refreshRateLimiter, userController.refreshToken);
 
 // Lists
 router.get('/tradesmen', userController.getAllTradesmen);
@@ -65,6 +69,7 @@ router.put(
     { name: "licenseDocument", maxCount: 1 },
     { name: "portfolioPhotos", maxCount: 10 },
   ]),
+  convertToJpg,
   userController.updateTradesmanProfile
 );
 
@@ -92,8 +97,8 @@ router.delete(
 );
 
 // Password reset
-router.post('/forgot-password', passwordResetRateLimiter, userController.forgotPassword);
-router.post('/verify-reset-otp', passwordResetRateLimiter, userController.verifyResetOtp);
+router.post('/forgot-password', passwordResetRateLimiter, passwordResetEmailRateLimiter, userController.forgotPassword);
+router.post('/verify-reset-otp', passwordResetRateLimiter, passwordResetEmailRateLimiter, userController.verifyResetOtp);
 router.post('/reset-password/:token', passwordResetRateLimiter, userController.resetPassword);
 
 

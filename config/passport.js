@@ -45,6 +45,8 @@ passport.use(
               await user.update({
                 googleId,
                 provider: "google",
+                // Linking: drop any password set before Google proved ownership of the email.
+                password: null,
                 isVerified: true,
                 profileImage: user.profileImage || profile.photos?.[0]?.value,
               });

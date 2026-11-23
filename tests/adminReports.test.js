@@ -72,7 +72,7 @@ test.before(async () => {
     email: `report-admin-${suffix}@test.com`,
     password: await bcrypt.hash("Password123!", 10),
   });
-  token = jwt.sign({ id: admin.id, role: "admin" }, process.env.JWT_SECRET, { expiresIn: "1h" });
+  token = jwt.sign({ id: admin.id, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret(), { expiresIn: "1h" });
 
   // 5 users: names carry the TAG so we can search for exactly these rows.
   const u1 = await makeUser(`${TAG} Alice`, "client", true);

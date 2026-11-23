@@ -1,5 +1,5 @@
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const { signAdminToken } = require('../../utils/authTokens');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const Admin = require('../../models/AdminModel/adminModel');
@@ -22,19 +22,9 @@ const clearResetState = {
     resetPasswordAttempts: 0,
 };
 
-// Admin sessions are short: there is no refresh token, so after this long the admin signs in again.
-// (Deleting an admin still cuts their access immediately; this only limits a stolen token.)
-const ADMIN_TOKEN_TTL = '1d';
-
-const signToken =(admin) => {
-    // The claim only says "this is an admin token". Super-admin status is read from the
-    // database on every request (verifyAdminToken), so it can change without re-login.
-    return jwt.sign(
-        { id: admin.id, role: 'admin' },
-        process.env.JWT_SECRET,
-        { expiresIn: ADMIN_TOKEN_TTL }
-    );
-};
+// Admin sessions are short (1h, see utils/authTokens.js) and there is no refresh token,
+// so the admin signs in again after that. Signed with JWT_ADMIN_SECRET, type "admin".
+const signToken = signAdminToken;
 
 const bootstrapFirstAdmin = async (req, res) => {
     const { name, email, password } = req.body || {};

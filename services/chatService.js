@@ -2,6 +2,7 @@ const { Op } = require('sequelize');
 const sequelize = require('../config/db');
 const Message = require('../models/messageModel');
 const User = require('../models/User');
+const Hire = require('../models/hireModel');
 const Conversation = require('../models/conversationModel');
 const ConversationParticipant = require('../models/conversationParticipantModel');
 const {
@@ -52,7 +53,7 @@ const normalizeCursorPagination = (beforeMessageId, limit = DEFAULT_LIMIT) => ({
  * Builds a lightweight public user object for chat payloads.
  *
  * @param {import('sequelize').Model|null|undefined} user - Sequelize user model instance.
- * @returns {{ id?: number, name?: string, email?: string, role?: string, profileImage?: string } | null}
+ * @returns {{ id?: number, name?: string, role?: string, profileImage?: string } | null}
  */
 const serializeChatUser = (user) => {
   if (!user) {
@@ -62,7 +63,6 @@ const serializeChatUser = (user) => {
   return {
     id: user.id,
     name: user.name,
-    email: user.email,
     role: user.role,
     profileImage: storageService.toPublicUrl(user.profileImage, {
       category: 'profile',
@@ -120,7 +120,7 @@ const getUserMapByIds = async (userIds) => {
 
   const users = await User.findAll({
     where: { id: uniqueUserIds },
-    attributes: ['id', 'name', 'email', 'role', 'profileImage'],
+    attributes: ['id', 'name', 'role', 'profileImage'],
   });
 
   return Object.fromEntries(users.map((user) => [user.id, user]));
@@ -289,11 +289,11 @@ const sendDirectMessage = async ({ senderId, receiverId, message }) => {
     const [sender, receiver] = await Promise.all([
       User.findByPk(normalizedSenderId, {
         transaction: tx,
-        attributes: ['id', 'name', 'email', 'role', 'profileImage', 'isDummy'],
+        attributes: ['id', 'name', 'role', 'profileImage', 'isDummy'],
       }),
       User.findByPk(normalizedReceiverId, {
         transaction: tx,
-        attributes: ['id', 'name', 'email', 'role', 'profileImage', 'isDummy'],
+        attributes: ['id', 'name', 'role', 'profileImage', 'isDummy'],
       }),
     ]);
 
@@ -308,6 +308,31 @@ const sendDirectMessage = async ({ senderId, receiverId, message }) => {
     // Test users and real users cannot message each other: to the sender it looks like a missing user.
     if (Boolean(sender.isDummy) !== Boolean(receiver.isDummy)) {
       throw new Error('Receiver not found');
+    }
+
+    // Chats are between a client and a tradesman. A tradesman may only write to a client who
+    // already messaged them or has a hire with them, so ids cannot be used to contact strangers.
+    if (sender.role === receiver.role) {
+      throw new Error('You cannot message this user');
+    }
+
+    if (sender.role === 'tradesman') {
+      const [clientWroteFirst, hasHire] = await Promise.all([
+        Message.findOne({
+          where: { senderId: normalizedReceiverId, receiverId: normalizedSenderId },
+          attributes: ['id'],
+          transaction: tx,
+        }),
+        Hire.findOne({
+          where: { clientId: normalizedReceiverId, tradesmanId: normalizedSenderId },
+          attributes: ['id'],
+          transaction: tx,
+        }),
+      ]);
+
+      if (!clientWroteFirst && !hasHire) {
+        throw new Error('You cannot message this user');
+      }
     }
 
     const conversation = await getOrCreateConversation({

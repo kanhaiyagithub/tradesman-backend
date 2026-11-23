@@ -18,7 +18,7 @@ const User = sequelize.define(
     email: {
       type: DataTypes.STRING,
       allowNull: false,
-      // unique: true
+      unique: true
     },
 
     mobile: {
@@ -55,6 +55,12 @@ const User = sequelize.define(
     resetPasswordExpires: {
       type: DataTypes.DATE,
       allowNull: true
+    },
+
+    resetPasswordAttempts: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 0
     },
     isVerified: {
       type: DataTypes.BOOLEAN,

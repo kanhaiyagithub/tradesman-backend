@@ -2,10 +2,13 @@ const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
 const session = require('express-session');
+const helmet = require('helmet');
 const passport = require('passport');
 const storageConfig = require('./config/storage');
 const { isOriginAllowed } = require('./utils/securityConfig');
 const { blockPrivateUploads } = require('./middlewares/privateUploads');
+const { generalRateLimiter } = require('./middlewares/rateLimitMiddleware');
+const { handleUploadErrors } = require('./middlewares/uploadMiddleware');
 
 // dotenv.config({ path: './config/config.env' });
 dotenv.config();
@@ -13,6 +16,21 @@ dotenv.config();
 // A default signing secret is unsafe in production: fail fast when it is missing.
 if (!process.env.SESSION_SECRET) {
   throw new Error('SESSION_SECRET is required. Set it in the environment before starting the server.');
+}
+
+// Production needs its own admin/refresh signing secrets so token kinds cannot be mixed up.
+require('./utils/authTokens').assertProductionSecrets();
+
+if (process.env.NODE_ENV === 'production') {
+  const hasGoogleClientId = [
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_MOBILE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_IDS,
+  ].some((value) => String(value || '').trim());
+
+  if (!hasGoogleClientId) {
+    throw new Error('A Google client ID (GOOGLE_CLIENT_ID / GOOGLE_MOBILE_CLIENT_ID) is required in production.');
+  }
 }
 
 require('./config/passport');
@@ -42,13 +60,10 @@ const metaRoutes = require('./routes/metaRoutes');
 
 const app = express();
 
-// Do not advertise the framework, and stop browsers guessing a different content type
-// for API responses and uploaded files.
+// Do not advertise the framework, and set the standard security headers (nosniff, HSTS, ...).
+// Uploaded photos are loaded by other origins (admin panel), so allow cross-origin reads.
 app.disable('x-powered-by');
-app.use((req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  next();
-});
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
 if (process.env.TRUST_PROXY === 'true') {
   // Trust first proxy when behind a reverse proxy (nginx, ALB, etc.).
@@ -77,6 +92,9 @@ app.post(
   stripeWebhookController.handleWebhook
 );
 
+// General per-IP limit for everything except the Stripe webhook above.
+app.use('/api', generalRateLimiter);
+
 /* ===========================
    JSON PARSER AFTER WEBHOOK
    =========================== */
@@ -101,6 +119,11 @@ app.use(
     secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+    },
   })
 );
 
@@ -139,6 +162,30 @@ app.use('/api/meta', metaRoutes);
  */
 app.get('/', (req, res) => {
   res.send('✅ Tradesman Travel App API is running...');
+});
+
+/* ===========================
+   ERROR HANDLING
+   =========================== */
+app.use(handleUploadErrors);
+
+// Last resort: never leak internals (stack traces, error.message) to the client.
+// eslint-disable-next-line no-unused-vars
+app.use((error, req, res, next) => {
+  if (error?.message === 'CORS origin is not allowed') {
+    return res.status(403).json({ success: false, message: 'Origin not allowed' });
+  }
+
+  if (error?.type === 'entity.parse.failed') {
+    return res.status(400).json({ success: false, message: 'Invalid JSON body' });
+  }
+
+  console.error('[UNHANDLED ERROR]', req.method, req.originalUrl, error);
+  if (res.headersSent) return next(error);
+  return res.status(error?.status || 500).json({
+    success: false,
+    message: error?.status && error.status < 500 ? error.message : 'Server error',
+  });
 });
 
 module.exports = app;

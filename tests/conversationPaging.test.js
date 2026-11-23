@@ -15,13 +15,13 @@ const { deleteUserRecords } = require("../services/userRecordPurge");
 const uniqueSuffix = `${Date.now()}-${process.pid}`;
 const createdUserIds = [];
 
-const makeUser = async (label) => {
+const makeUser = async (label, role = "client") => {
   const user = await User.create({
     name: `Paging ${label}`,
     email: `paging-${label}-${uniqueSuffix}@test.com`,
     mobile: "0400000002",
     password: await bcrypt.hash("Password123!", 10),
-    role: "client",
+    role,
     provider: "manual",
   });
   createdUserIds.push(user.id);
@@ -37,7 +37,7 @@ test.after(async () => {
 
 test("conversation pages report hasMore correctly in page and cursor mode", async () => {
   const alice = await makeUser("alice");
-  const bob = await makeUser("bob");
+  const bob = await makeUser("bob", "tradesman");
 
   for (let i = 1; i <= 5; i += 1) {
     await chatService.sendDirectMessage({

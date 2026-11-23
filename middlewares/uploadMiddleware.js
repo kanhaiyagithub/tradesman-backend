@@ -2,6 +2,8 @@ const multer = require('multer');
 const sharp = require('sharp');
 const { resolveStorageCategory } = require('../services/storage/helpers/storagePath');
 
+const MAX_INPUT_PIXELS = 40 * 1000 * 1000;
+
 /**
  * Shared in-memory upload middleware.
  *
@@ -12,7 +14,12 @@ const { resolveStorageCategory } = require('../services/storage/helpers/storageP
  */
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 2 * 1024 * 1024 },
+  limits: {
+    fileSize: 2 * 1024 * 1024,
+    files: 12,
+    fields: 40,
+    parts: 60,
+  },
   fileFilter: (req, file, cb) => {
     const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png'];
 
@@ -69,7 +76,11 @@ const convertToJpg = async (req, res, next) => {
     }
 
     for (const file of files) {
-      file.processedBuffer = await sharp(file.buffer)
+      // rotate() applies the phone's EXIF orientation, flatten() puts transparent PNGs on white
+      // (instead of black), limitInputPixels rejects decompression bombs.
+      file.processedBuffer = await sharp(file.buffer, { limitInputPixels: MAX_INPUT_PIXELS })
+        .rotate()
+        .flatten({ background: '#ffffff' })
         .jpeg({ quality: 90 })
         .toBuffer();
       file.processedMimeType = 'image/jpeg';
@@ -87,7 +98,24 @@ const convertToJpg = async (req, res, next) => {
   }
 };
 
+/**
+ * Error middleware for upload routes: multer limit errors (file too large, too many
+ * files/fields) are client mistakes, so they answer 400/413 instead of a generic 500.
+ */
+const handleUploadErrors = (error, req, res, next) => {
+  if (!(error instanceof multer.MulterError)) return next(error);
+
+  const tooLarge = error.code === 'LIMIT_FILE_SIZE';
+  return res.status(tooLarge ? 413 : 400).json({
+    success: false,
+    message: tooLarge
+      ? 'Image is too large. The maximum size is 2 MB.'
+      : 'Too many files or fields in the upload.',
+  });
+};
+
 module.exports = {
   upload,
   convertToJpg,
+  handleUploadErrors,
 };

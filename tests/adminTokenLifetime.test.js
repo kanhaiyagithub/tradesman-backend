@@ -37,7 +37,7 @@ test.after(async () => {
   await sequelize.close();
 });
 
-test("an admin login token lasts one day", async () => {
+test("an admin login token lasts one hour", async () => {
   resetRateLimitBuckets();
   const response = await fetch(`${baseUrl}/api/admin/login`, {
     method: "POST",
@@ -47,19 +47,20 @@ test("an admin login token lasts one day", async () => {
   assert.equal(response.status, 200);
 
   const { token } = (await response.json()).data;
-  const claims = jwt.verify(token, process.env.JWT_SECRET);
+  const claims = jwt.verify(token, require("../utils/authTokens").getAdminSecret());
   assert.equal(claims.role, "admin");
-  assert.equal(claims.exp - claims.iat, 24 * 60 * 60);
+  assert.equal(claims.type, "admin");
+  assert.equal(claims.exp - claims.iat, 60 * 60);
 });
 
 test("an expired admin token is rejected with 401", async () => {
-  const expired = jwt.sign({ id: admin.id, role: "admin" }, process.env.JWT_SECRET, { expiresIn: -10 });
+  const expired = jwt.sign({ id: admin.id, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret(), { expiresIn: -10 });
   const response = await fetch(`${baseUrl}/api/admin/admins`, {
     headers: { Authorization: `Bearer ${expired}` },
   });
   assert.equal(response.status, 401);
 
-  const fresh = jwt.sign({ id: admin.id, role: "admin" }, process.env.JWT_SECRET, { expiresIn: "1d" });
+  const fresh = jwt.sign({ id: admin.id, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret(), { expiresIn: "1d" });
   const ok = await fetch(`${baseUrl}/api/admin/admins`, { headers: { Authorization: `Bearer ${fresh}` } });
   assert.equal(ok.status, 200);
 });

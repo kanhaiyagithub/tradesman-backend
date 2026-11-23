@@ -100,7 +100,7 @@ test.before(async () => {
     email: `dummy-admin-${suffix}@test.com`,
     password: await bcrypt.hash(ADMIN_PASSWORD, 10),
   });
-  token = jwt.sign({ id: admin.id, role: "admin" }, process.env.JWT_SECRET, { expiresIn: "1h" });
+  token = jwt.sign({ id: admin.id, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret(), { expiresIn: "1h" });
 
   trade = await TradesType.create({ name: `${TAG} Trade`, category: "Test", isActive: true, licenceRequired: true });
   if ((await SubscriptionPlan.count()) === 0) {
@@ -360,7 +360,7 @@ test("a test tradesman is found by test clients only, never by real clients", as
   assert.equal(asTestClient.status, 200);
   assert.ok(JSON.stringify(asTestClient.body).includes("Visible Vic"), "a test client sees the test tradesman");
 
-  const realToken = jwt.sign({ id: realClient.id, email: realClient.email, role: "client" }, process.env.JWT_SECRET);
+  const realToken = jwt.sign({ id: realClient.id, email: realClient.email, role: "client", type: "access" }, require("../utils/authTokens").getAccessSecret());
   const asRealClient = await call("GET", `/api/users/tradesmen/filter?tradeTypeId=${trade.id}`, { as: realToken });
   assert.equal(asRealClient.status, 200);
   assert.ok(!JSON.stringify(asRealClient.body).includes("Visible Vic"), "a real client never sees it");

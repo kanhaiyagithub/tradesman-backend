@@ -1,4 +1,4 @@
-const jwt = require("jsonwebtoken");
+const { verifyAccessToken, verifyAdminJwt } = require("./utils/authTokens");
 const Admin = require("./models/AdminModel/adminModel");
 const { processLiveLocation } = require("./services/liveLocationService");
 const chatService = require("./services/chatService");
@@ -16,6 +16,25 @@ const onlineUsers = new Map();
 const liveLocationThrottle = new Map();
 
 const LIVE_LOCATION_MIN_INTERVAL_MS = 5000;
+
+// Per-user send-message limit: at most MESSAGE_LIMIT messages per window.
+const MESSAGE_LIMIT = 20;
+const MESSAGE_WINDOW_MS = 10 * 1000;
+const messageHits = new Map();
+
+const allowSocketMessage = (userId) => {
+  const now = Date.now();
+  const hits = (messageHits.get(userId) || []).filter((at) => now - at < MESSAGE_WINDOW_MS);
+
+  if (hits.length >= MESSAGE_LIMIT) {
+    messageHits.set(userId, hits);
+    return false;
+  }
+
+  hits.push(now);
+  messageHits.set(userId, hits);
+  return true;
+};
 
 const validateSocketLiveLocation = (user, payload = {}) => {
   if (!user?.id) {
@@ -98,22 +117,29 @@ module.exports = {
           return next(new Error("Unauthorized: No token provided"));
         }
 
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-        // Refresh tokens are only valid at POST /api/users/refresh-token.
-        if (decoded.type === "refresh") {
-          return next(new Error("Unauthorized"));
-        }
-
-        // Admin tokens share the JWT secret but their ids are Admin ids, not User ids.
+        // Admin tokens have their own secret and carry Admin ids, not User ids.
         // They must never be treated as a user (chat, live location, online map).
-        if (decoded.role === "admin") {
+        let decoded;
+        try {
+          decoded = verifyAccessToken(token);
+        } catch (userTokenError) {
+          if (userTokenError.name === "TokenExpiredError") throw userTokenError;
+          decoded = verifyAdminJwt(token);
           const admin = await Admin.findByPk(decoded.id);
           if (!admin) return next(new Error("Unauthorized"));
           socket.isAdmin = true;
         }
 
         socket.user = decoded;
+        // The token is only checked at connect, so drop the socket when it expires.
+        if (decoded.exp) {
+          const expiryTimer = setTimeout(
+            () => socket.disconnect(true),
+            Math.max(decoded.exp * 1000 - Date.now(), 0)
+          );
+          expiryTimer.unref?.();
+          socket.once("disconnect", () => clearTimeout(expiryTimer));
+        }
         next();
       } catch (error) {
         console.error("[SOCKET AUTH ERROR]", error.message);
@@ -151,14 +177,6 @@ module.exports = {
         socket.userId = finalUserId;
       });
 
-      socket.on("join-room", ({ roomId }) => {
-        if (!roomId) {
-          return;
-        }
-
-        socket.join(String(roomId));
-      });
-
       socket.on("send-message", async (payload = {}, ack) => {
         try {
           const senderId = Number(socket.user?.id || payload.senderId);
@@ -174,11 +192,15 @@ module.exports = {
             if (typeof ack === "function") ack(response);
             return;
           }
-          console.log("[SOCKET MESSAGE RECEIVED]", {
-            senderId,
-            receiverId,
-            preview: message.substring(0, 60),
-          });
+          if (!allowSocketMessage(senderId)) {
+            const response = {
+              success: false,
+              message: "You are sending messages too quickly. Please slow down.",
+            };
+
+            if (typeof ack === "function") ack(response);
+            return;
+          }
 
           const savedMessage = await chatService.sendDirectMessage({
             senderId,

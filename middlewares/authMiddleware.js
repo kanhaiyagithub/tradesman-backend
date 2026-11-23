@@ -1,5 +1,4 @@
-const jwt = require('jsonwebtoken');
-require('dotenv').config({ path: './config/config.env' });
+const { verifyAccessToken } = require('../utils/authTokens');
 
 /**
  * Every authentication failure is a 401 with the same body shape
@@ -19,12 +18,8 @@ exports.verifyToken = (req, res, next) => {
 
   const token = authHeader.split(' ')[1];
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-    // Refresh tokens are only accepted by the refresh endpoint.
-    if (decoded.type === 'refresh') {
-      return unauthorized(res, 'TOKEN_INVALID', 'Invalid token');
-    }
+    // Only access tokens: refresh and admin tokens are rejected.
+    const decoded = verifyAccessToken(token);
 
     req.user = decoded;   // { id, email, role, iat, exp }
     next();

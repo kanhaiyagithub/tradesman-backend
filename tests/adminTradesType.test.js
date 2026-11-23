@@ -42,7 +42,7 @@ test.before(async () => {
     email: `trades-admin-${uniqueSuffix}@test.com`,
     password: await bcrypt.hash("Password123!", 10),
   });
-  token = jwt.sign({ id: admin.id, role: "admin" }, process.env.JWT_SECRET);
+  token = jwt.sign({ id: admin.id, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret());
 
   server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));

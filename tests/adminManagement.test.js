@@ -24,7 +24,7 @@ let superAdmin;
 let tokens = {};
 
 const tokenFor = (admin) =>
-  jwt.sign({ id: admin.id, role: "admin" }, process.env.JWT_SECRET, { expiresIn: "1h" });
+  jwt.sign({ id: admin.id, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret(), { expiresIn: "1h" });
 
 const makeAdmin = async (label) => {
   const admin = await Admin.create({

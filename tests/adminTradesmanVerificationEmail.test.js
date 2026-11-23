@@ -188,7 +188,7 @@ test("approving a tradesman emails them and creates an in-app notification", asy
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   try {
-    const token = jwt.sign({ id: admin.id, role: "admin" }, process.env.JWT_SECRET);
+    const token = jwt.sign({ id: admin.id, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret());
     const response = await fetch(
       `http://127.0.0.1:${server.address().port}/api/admin/tradesmen/${tradesman.id}/approve`,
       { method: "POST", headers: { Authorization: `Bearer ${token}` } }
@@ -226,7 +226,7 @@ test("rejecting a tradesman requires a reason, then emails and notifies them", a
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   try {
-    const token = jwt.sign({ id: admin.id, role: "admin" }, process.env.JWT_SECRET);
+    const token = jwt.sign({ id: admin.id, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret());
     const reject = (body) =>
       fetch(
         `http://127.0.0.1:${server.address().port}/api/admin/tradesmen/${tradesman.id}/reject`,
@@ -279,10 +279,10 @@ test("rejected tradesman: subscribing sends no email, resubmitting does, then ap
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const adminToken = jwt.sign({ id: admin.id, role: "admin" }, process.env.JWT_SECRET);
+  const adminToken = jwt.sign({ id: admin.id, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret());
   const userToken = jwt.sign(
-    { id: tradesman.id, email: tradesman.email, role: "tradesman" },
-    process.env.JWT_SECRET
+    { id: tradesman.id, email: tradesman.email, role: "tradesman", type: "access" },
+    require("../utils/authTokens").getAccessSecret()
   );
   const post = (path, token, body) =>
     fetch(`${base}${path}`, {
@@ -369,7 +369,7 @@ test("admin queue and dashboard count only subscribed tradesmen", async () => {
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const adminToken = jwt.sign({ id: admin.id, role: "admin" }, process.env.JWT_SECRET);
+  const adminToken = jwt.sign({ id: admin.id, role: "admin", type: "admin" }, require("../utils/authTokens").getAdminSecret());
   const get = (path) =>
     fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${adminToken}` } }).then((r) => r.json());
   const emailsIn = (response) => response.data.data.map((row) => row.user.email);
