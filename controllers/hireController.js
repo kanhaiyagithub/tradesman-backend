@@ -2,6 +2,7 @@ const Hire = require("../models/hireModel");
 const User = require("../models/User");
 const TradesmanDetails = require("../models/TradesmanDetails");
 const { Op } = require("sequelize");
+const sequelize = require("../config/db");
 const { sendPushNotification } = require("./notificationController");
 const { getRequesterWorld, worldWhere } = require("../services/dummyWorld");
 
@@ -135,15 +136,39 @@ exports.requestHire = async (req, res) => {
       return sendResponse(res, 400, false, "Target must be an approved tradesman");
     }
 
-    const activeHire = await Hire.findOne({
-      where: {
-        clientId,
-        tradesmanId,
-        status: { [Op.in]: ACTIVE_HIRE_STATUSES },
-      },
+    // Two simultaneous requests must not both pass the "no active hire" check: locking the
+    // client's row makes the second request wait until the first has been saved.
+    const hire = await sequelize.transaction(async (transaction) => {
+      await User.findByPk(clientId, {
+        attributes: ["id"],
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+
+      const activeHire = await Hire.findOne({
+        where: {
+          clientId,
+          tradesmanId,
+          status: { [Op.in]: ACTIVE_HIRE_STATUSES },
+        },
+        transaction,
+      });
+
+      if (activeHire) return null;
+
+      return Hire.create(
+        {
+          clientId,
+          tradesmanId,
+          jobDescription: jobDescription || null,
+          status: "pending",
+          requestCompletion: false,
+        },
+        { transaction }
+      );
     });
 
-    if (activeHire) {
+    if (!hire) {
       return sendResponse(
         res,
         400,
@@ -151,14 +176,6 @@ exports.requestHire = async (req, res) => {
         "Active hire already exists with this tradesman"
       );
     }
-
-    const hire = await Hire.create({
-      clientId,
-      tradesmanId,
-      jobDescription: jobDescription || null,
-      status: "pending",
-      requestCompletion: false,
-    });
 
     const client = await User.findByPk(clientId, { attributes: ["name"] });
     notifyUser(

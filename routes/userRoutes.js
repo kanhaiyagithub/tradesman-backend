@@ -46,7 +46,7 @@ router.post('/tradesmen/filter', verifyToken, userController.filterTradesmen);
 router.get('/account-verification', verifyToken, getAccountVerificationMethod);
 router.post('/account-otp', verifyToken, authRateLimiter, sendAccountOtp);
 
-router.get('/profile/:id', userController.getFullUserProfile);
+router.get('/profile/:id', verifyToken, userController.getFullUserProfile);
 router.get('/me', verifyToken, userController.getMeProfile);
 router.get('/clients/:clientId/profile', verifyToken, userController.getClientProfileForTradesman);
 

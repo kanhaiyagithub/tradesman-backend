@@ -32,6 +32,13 @@ router.post(
   tradesmanApprovalController.reject
 );
 
+/* Revoke an approval */
+router.post(
+  "/tradesmen/:userId/revoke",
+  verifyAdminToken,
+  tradesmanApprovalController.revoke
+);
+
 /* Licence document (authenticated; files are not served by URL) */
 router.get(
   "/tradesmen/:userId/license",

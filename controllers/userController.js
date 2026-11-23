@@ -1588,7 +1588,7 @@ exports.getClientProfileForTradesman = async (req, res) => {
     });
   } catch (error) {
     console.error("Client Profile Access Error:", error);
-    return sendResponse(res, 500, false, "Server error", null, error.message);
+    return sendResponse(res, 500, false, "Server error");
   }
 };
 
@@ -1630,23 +1630,15 @@ exports.getFullUserProfile = async (req, res) => {
     let jobHistory = [];
 
     if (user.role === "tradesman") {
+      // Customers' names and addresses are private: only the job itself is shown.
       const jobs = await Hire.findAll({
         where: { tradesmanId: userId },
-        include: [
-          {
-            model: User,
-            as: "client",
-            attributes: ["id", "name"],
-          },
-        ],
         order: [["updatedAt", "DESC"]],
       });
 
       jobHistory = jobs.map((j) => ({
         jobId: j.id,
-        customerName: j.client?.name || null,
         jobTitle: j.jobTitle || "Service Work",
-        address: j.address || null,
         status: j.status,
         date: j.updatedAt,
       }));
@@ -2847,153 +2839,5 @@ exports.resubmitTradesmanVerification = async (req, res) => {
   } catch (error) {
     console.error("Resubmit Verification Error:", error);
     return sendResponse(res, 500, false, "Server error");
-  }
-};
-
-exports.filterNearbyTradesmen = async (req, res) => {
-  try {
-    const {
-      latitude,
-      longitude,
-      radius = 40, // km
-      tradeTypeId,
-      tradeType,
-      minRating = 0,
-      onlyVerified = true,
-      licenceVerifiedOnly = false,
-      availability = "open",
-    } = req.body;
-
-    if (
-      latitude === undefined ||
-      latitude === null ||
-      longitude === undefined ||
-      longitude === null
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Latitude & longitude required",
-      });
-    }
-
-    if (Number.isNaN(Number(latitude)) || Number.isNaN(Number(longitude))) {
-      return res.status(400).json({
-        success: false,
-        message: "Latitude and longitude must be valid numbers",
-      });
-    }
-
-    if (
-      tradeTypeId !== undefined &&
-      tradeTypeId !== null &&
-      tradeTypeId !== "" &&
-      Number.isNaN(Number(tradeTypeId))
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "tradeTypeId must be a valid number",
-      });
-    }
-
-    const distanceSQL = `
-      (6371 * acos(
-        cos(radians(${Number(latitude)})) *
-        cos(radians(travelPlans.latitude)) *
-        cos(radians(travelPlans.longitude) - radians(${Number(longitude)})) +
-        sin(radians(${Number(latitude)})) *
-        sin(radians(travelPlans.latitude))
-      ))
-    `;
-
-    const tradesmanWhere = {
-      ...(onlyVerified && { isApproved: true }),
-      ...(isTruthyFlag(licenceVerifiedOnly) && { licenceVerified: true }),
-    };
-
-    if (
-      tradeTypeId !== undefined &&
-      tradeTypeId !== null &&
-      tradeTypeId !== ""
-    ) {
-      tradesmanWhere.tradeTypeId = Number(tradeTypeId);
-    } else if (tradeType) {
-      tradesmanWhere.tradeType = tradeType;
-    }
-
-    // Test tradesmen are only shown to test users, and real tradesmen only to real users.
-    const tradesmen = await User.findAll({
-      where: { role: "tradesman", ...worldWhere(await getRequesterWorld(req)) },
-      attributes: ["id", "name", "profileImage"],
-
-      include: [
-        {
-          model: TradesmanDetails,
-          as: "TradesmanDetail",
-          required: true,
-          where: tradesmanWhere,
-        },
-        {
-          model: TravelPlan,
-          as: "travelPlans",
-          required: true,
-          where: {
-            status: availability,
-            latitude: { [Op.ne]: null },
-            longitude: { [Op.ne]: null },
-          },
-          attributes: {
-            include: [[literal(distanceSQL), "distance"]],
-          },
-        },
-      ],
-
-      having: literal(`${distanceSQL} <= ${Number(radius)}`),
-      order: [[literal(distanceSQL), "ASC"]],
-    });
-
-    const nearbyTradeMap = await getTradeLicenceMap(tradesmen.map((row) => row.TradesmanDetail?.tradeTypeId));
-
-    const result = await Promise.all(
-      tradesmen.map(async (t) => {
-        const ratingAgg = await Review.findOne({
-          where: { toUserId: t.id },
-          attributes: [
-            [fn("AVG", col("rating")), "avgRating"],
-            [fn("COUNT", col("id")), "reviewCount"],
-          ],
-          raw: true,
-        });
-
-        const rating = ratingAgg?.avgRating ? Number(ratingAgg.avgRating) : 0;
-
-        if (rating < Number(minRating)) return null;
-
-        return {
-          id: t.id,
-          name: t.name,
-          profileImage: toPublicProfileImage(t.profileImage),
-          tradeTypeId: t.TradesmanDetail?.tradeTypeId || null,
-          tradeType: t.TradesmanDetail?.tradeType || null,
-          businessName: t.TradesmanDetail?.businessName || null,
-          ...toPublicLicenceInfo(t.TradesmanDetail, nearbyTradeMap),
-          rating: rating.toFixed(1),
-          reviewCount: ratingAgg?.reviewCount || 0,
-          distance: Number(t.travelPlans[0].get("distance")).toFixed(2),
-          availability: "Available",
-        };
-      }),
-    );
-
-    return res.json({
-      success: true,
-      message: "Filtered tradesmen fetched",
-      data: result.filter(Boolean),
-    });
-  } catch (err) {
-    console.error("Filter error:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-    });
   }
 };

@@ -80,6 +80,29 @@ const getConfiguredSubscriptionPlanById = async (planId) => {
   return plan;
 };
 
+// The free trial is once per user, however many times they cancel and resubscribe.
+const userHasUsedTrial = async (userId) => {
+  const previous = await UserSubscription.findOne({
+    where: {
+      userId,
+      [Op.or]: [{ trialUsedAt: { [Op.ne]: null } }, { trialEndsAt: { [Op.ne]: null } }],
+    },
+    attributes: ["id"],
+  });
+  return Boolean(previous);
+};
+
+// Like the above, but a payment-failed subscription also counts: starting another one would bill twice.
+const getBlockingSubscriptionForUser = async (userId) => {
+  return UserSubscription.findOne({
+    where: {
+      userId,
+      status: { [Op.in]: ["active", "trialing", "past_due", "unpaid"] },
+    },
+    order: [["createdAt", "DESC"]],
+  });
+};
+
 const getManageableSubscriptionForUser = async (userId) => {
   return UserSubscription.findOne({
     where: {
@@ -107,6 +130,9 @@ const syncLocalSubscriptionAfterCancel = async (
   localSubscription.cancelAtPeriodEnd =
     !!stripeSubscription.cancel_at_period_end;
   localSubscription.trialEndsAt = fromUnix(stripeSubscription.trial_end);
+  if (stripeSubscription.trial_end && !localSubscription.trialUsedAt) {
+    localSubscription.trialUsedAt = fromUnix(stripeSubscription.trial_end);
+  }
 
   if (stripeSubscription.status === "canceled") {
     localSubscription.endDate = new Date();
@@ -306,6 +332,8 @@ exports.createCheckoutSession = async (req, res) => {
       await localSubscription.save();
     }
 
+    const trialAlreadyUsed = await userHasUsedTrial(userId);
+
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       customer: localSubscription.stripeCustomerId,
@@ -321,7 +349,7 @@ exports.createCheckoutSession = async (req, res) => {
         },
       ],
       subscription_data: {
-        trial_period_days: TRIAL_DAYS,
+        ...(trialAlreadyUsed ? {} : { trial_period_days: TRIAL_DAYS }),
         metadata: {
           userId: String(userId),
           planId: String(plan.id),
@@ -337,7 +365,7 @@ exports.createCheckoutSession = async (req, res) => {
     });
   } catch (err) {
     console.error("createCheckoutSession error:", err);
-    return sendResponse(res, 500, false, err.message || "Server error");
+    return sendResponse(res, 500, false, "Server error");
   }
 };
 
@@ -494,7 +522,7 @@ async function changePlan(req, res, mode) {
     );
   } catch (err) {
     console.error(`${mode} plan error:`, err);
-    return sendResponse(res, 500, false, err.message || "Server error");
+    return sendResponse(res, 500, false, "Server error");
   }
 }
 
@@ -617,7 +645,7 @@ exports.cancelSubscription = async (req, res) => {
     );
   } catch (err) {
     console.error("cancelSubscription error:", err);
-    return sendResponse(res, 500, false, err.message || "Server error");
+    return sendResponse(res, 500, false, "Server error");
   }
 };
 
@@ -666,11 +694,11 @@ exports.createMobileSetupIntent = async (req, res) => {
       );
     }
 
-    const existingSubscription = await getManageableSubscriptionForUser(userId);
+    const existingSubscription = await getBlockingSubscriptionForUser(userId);
     if (
       existingSubscription &&
       existingSubscription.stripeSubscriptionId &&
-      ["active", "trialing"].includes(existingSubscription.status)
+      ["active", "trialing", "past_due", "unpaid"].includes(existingSubscription.status)
     ) {
       return sendResponse(
         res,
@@ -717,7 +745,7 @@ exports.createMobileSetupIntent = async (req, res) => {
     );
   } catch (err) {
     console.error("createMobileSetupIntent error:", err);
-    return sendResponse(res, 500, false, err.message || "Server error");
+    return sendResponse(res, 500, false, "Server error");
   }
 };
 
@@ -750,11 +778,11 @@ exports.createMobileSubscription = async (req, res) => {
       return sendResponse(res, 400, false, "setupIntentId is required");
     }
 
-    const existingSubscription = await getManageableSubscriptionForUser(userId);
+    const existingSubscription = await getBlockingSubscriptionForUser(userId);
     if (
       existingSubscription &&
       existingSubscription.stripeSubscriptionId &&
-      ["active", "trialing"].includes(existingSubscription.status)
+      ["active", "trialing", "past_due", "unpaid"].includes(existingSubscription.status)
     ) {
       return sendResponse(
         res,
@@ -848,11 +876,13 @@ exports.createMobileSubscription = async (req, res) => {
     localSubscription.stripeCustomerId = customerId;
     await localSubscription.save();
 
+    const trialAlreadyUsed = await userHasUsedTrial(userId);
+
     const stripeSubscription = await stripe.subscriptions.create({
       customer: customerId,
       items: [{ price: plan.stripePriceId }],
       default_payment_method: paymentMethodId,
-      trial_period_days: TRIAL_DAYS,
+      ...(trialAlreadyUsed ? {} : { trial_period_days: TRIAL_DAYS }),
       payment_settings: {
         save_default_payment_method: "on_subscription",
       },
@@ -865,6 +895,9 @@ exports.createMobileSubscription = async (req, res) => {
     localSubscription.stripeSubscriptionId = stripeSubscription.id;
     localSubscription.status = stripeSubscription.status;
     localSubscription.trialEndsAt = fromUnix(stripeSubscription.trial_end);
+    if (stripeSubscription.trial_end && !localSubscription.trialUsedAt) {
+      localSubscription.trialUsedAt = fromUnix(stripeSubscription.trial_end);
+    }
     localSubscription.currentPeriodStart = fromUnix(
       stripeSubscription.current_period_start
     );
@@ -893,6 +926,6 @@ exports.createMobileSubscription = async (req, res) => {
     );
   } catch (err) {
     console.error("createMobileSubscription error:", err);
-    return sendResponse(res, 500, false, err.message || "Server error");
+    return sendResponse(res, 500, false, "Server error");
   }
 };

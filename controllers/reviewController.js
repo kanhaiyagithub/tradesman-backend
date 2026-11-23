@@ -2,6 +2,8 @@
 const Review = require("../models/reviewModel");
 const Hire = require("../models/hireModel");
 
+const MAX_COMMENT_LENGTH = 1000;
+
 exports.addReview = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -57,12 +59,20 @@ exports.addReview = async (req, res) => {
       return res.status(400).json({ success: false, message: "Review already submitted" });
     }
 
+    const reviewComment = comment ? String(comment).trim() : null;
+    if (reviewComment && reviewComment.length > MAX_COMMENT_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        message: `Comment must be ${MAX_COMMENT_LENGTH} characters or less`
+      });
+    }
+
     const review = await Review.create({
       hireId,
       fromUserId,
       toUserId,
       rating: numericRating,
-      comment: comment ? String(comment).trim() : null,
+      comment: reviewComment,
       role: userRole
     });
 
@@ -75,8 +85,12 @@ exports.addReview = async (req, res) => {
     });
 
   } catch (err) {
+    // Two simultaneous submissions: the unique index rejects the second one.
+    if (err.name === "SequelizeUniqueConstraintError") {
+      return res.status(400).json({ success: false, message: "Review already submitted" });
+    }
     console.error(err);
-    res.status(500).json({ success: false, message: err.message });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 // GET /api/review/pending

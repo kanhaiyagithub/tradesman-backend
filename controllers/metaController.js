@@ -17,6 +17,14 @@ exports.saveAttribution = async (req, res) => {
     });
   }
 
+  // Say so when tracking is off, so the app (and whoever deploys) can tell "nothing stored" from success.
+  if (!metaConversionService.isTrackingEnabled()) {
+    return res.status(200).json({
+      success: true,
+      data: { saved: false, reason: "tracking_disabled" },
+    });
+  }
+
   const saved = await metaConversionService.trackAttributionOnly({
     userId: req.user.id,
     metaAttribution: body,

@@ -135,7 +135,7 @@ test("licence number, expiry and document are never exposed publicly", async () 
     `/api/users/tradesmen?tradeTypeId=${licensed.id}`,
   ];
   for (const path of endpoints) {
-    const text = JSON.stringify((await get(path)).body);
+    const text = JSON.stringify((await get(path, viewerToken)).body);
     assert.ok(!text.includes("SECRET-NUMBER-123"), path);
     assert.ok(!text.includes("secret.png"), path);
     assert.ok(!text.includes("2035-01-01"), path);
@@ -143,7 +143,7 @@ test("licence number, expiry and document are never exposed publicly", async () 
 });
 
 test("the full profile includes the work photos as loadable URLs", async () => {
-  const full = (await get(`/api/users/profile/${people.verified.id}`)).body.data;
+  const full = (await get(`/api/users/profile/${people.verified.id}`, viewerToken)).body.data;
   assert.equal(full.portfolioPhotos.length, 2);
   assert.ok(full.portfolioPhotos.every((url) => url.includes("portfolio/work-")), JSON.stringify(full.portfolioPhotos));
 });
@@ -154,7 +154,7 @@ test("lists and the full profile carry the same licence fields", async () => {
   assert.equal(row.licenceVerified, true);
   assert.equal(row.licenceRequired, true);
 
-  const full = (await get(`/api/users/profile/${people.verified.id}`)).body.data;
+  const full = (await get(`/api/users/profile/${people.verified.id}`, viewerToken)).body.data;
   assert.deepEqual(licenceOf(full), { required: true, label: `${TAG} licence (QBCC)`, verified: true });
 
 });

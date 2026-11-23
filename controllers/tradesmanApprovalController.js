@@ -85,6 +85,7 @@ const {
   applyVerificationState,
   isLicenceRequired,
   buildLicenceRequiredLiteral,
+  licenceExpiryStatus,
 } = require("../services/verificationStateService");
 
 const getTradesmanDetailsForAdmin = async (userId) =>
@@ -226,6 +227,11 @@ async function approve(req, res) {
       });
     }
 
+    // An expired licence cannot be approved: the tradesman must send a current one first.
+    if (licenceRequired && licenceExpiryStatus(details.licenseExpiry).expired) {
+      return send(res, 400, false, "The licence has expired. Ask the tradesman to resubmit a current licence.");
+    }
+
     // Approving by hand is the licence check: only a licence-required trade ends up "licence verified".
     await applyVerificationState(details, user, "approved", {
       adminId: req.user.id,
@@ -246,6 +252,52 @@ async function approve(req, res) {
     publishApprovalsUpdate({ type: "decided" });
 
     return send(res, 200, true, "Tradesman approved", {
+      user: sanitizeUser(user),
+      details: serializeDetails(details),
+    });
+  } catch (err) {
+    console.error(err);
+    return send(res, 500, false, "Server error");
+  }
+}
+
+/** Takes an approved tradesman off the list again (fraud, a lapsed licence, ...). They can fix it and resubmit. */
+async function revoke(req, res) {
+  try {
+    const userId = parseUserId(req.params.userId);
+    if (!userId) {
+      return send(res, 400, false, "userId must be a positive integer");
+    }
+
+    const reason = normalizeOptionalString(req.body?.reason);
+    if (!reason) {
+      return send(res, 400, false, "A reason is required to revoke approval");
+    }
+
+    if (reason.length > 500) {
+      return send(res, 400, false, "Reason must be 500 characters or less");
+    }
+
+    const details = await getTradesmanDetailsForAdmin(userId);
+    if (!details) return send(res, 404, false, "Tradesman details not found");
+
+    if (!details.isApproved) {
+      return send(res, 400, false, "Only approved tradesmen can have their approval revoked");
+    }
+
+    const user = await User.findByPk(userId);
+    await applyVerificationState(details, user, "rejected", { adminId: req.user.id, reason });
+
+    sendPushNotification(
+      userId,
+      "Profile Update",
+      `Your tradesman approval was withdrawn. Reason: ${reason}`,
+      { type: "PROFILE_REJECTED", reason }
+    );
+    sendTradesmanRejectedEmail({ user, reason, rejectedAt: details.approvedAt });
+    publishApprovalsUpdate({ type: "decided" });
+
+    return send(res, 200, true, "Approval revoked", {
       user: sanitizeUser(user),
       details: serializeDetails(details),
     });
@@ -411,6 +463,7 @@ module.exports = {
   getPending,
   approve,
   reject,
+  revoke,
   getOne,
   validateApprovalReadiness,
 };

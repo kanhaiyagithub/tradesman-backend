@@ -20,7 +20,6 @@ const {
  * Meta problem can never break signup, login or the Stripe webhook.
  */
 
-const DEFAULT_DATASET_ID = "1813699159758304";
 const MAX_TOTAL_ATTEMPTS = 8;
 const ATTEMPTS_PER_DISPATCH = 3;
 const PENDING_RETRY_AFTER_MS = 5 * 60 * 1000;
@@ -39,12 +38,14 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const getConfig = () => ({
   enabled: process.env.META_CAPI_ENABLED === "true",
   appId: process.env.META_APP_ID || "",
-  datasetId: process.env.META_DATASET_ID || DEFAULT_DATASET_ID,
+  // No built-in dataset: a server that forgets to set its own must stay off, not feed the live dataset.
+  datasetId: process.env.META_DATASET_ID || "",
   accessToken: process.env.META_CAPI_ACCESS_TOKEN || "",
   testEventCode: process.env.META_TEST_EVENT_CODE || "",
   apiVersion: process.env.META_GRAPH_API_VERSION || "v23.0",
   defaultPhoneCountryCode: process.env.META_DEFAULT_PHONE_COUNTRY_CODE || "61",
-  defaultTrackingEnabled: process.env.META_DEFAULT_TRACKING_ENABLED !== "false",
+  // Consent is opt-in: when the app did not report the user's tracking choice, treat it as "no".
+  defaultTrackingEnabled: process.env.META_DEFAULT_TRACKING_ENABLED === "true",
   timeoutMs: Number(process.env.META_CAPI_TIMEOUT_MS) || 8000,
 });
 
@@ -417,6 +418,64 @@ const trackSubscribeFromInvoice = async (invoice) => {
 };
 
 /**
+ * StartTrial when a subscription begins its free trial. Never throws.
+ * Subscribe only fires on the first PAID invoice (about two weeks later, often outside
+ * Meta's attribution window), so the trial start is what ads can optimise on.
+ * The fixed `starttrial_{subscriptionId}` event id makes webhook retries harmless.
+ */
+const trackStartTrial = async (stripeSubscription) => {
+  try {
+    const config = getConfig();
+    if (!isReady(config)) return { tracked: false, reason: "disabled" };
+    if (!stripeSubscription || !stripeSubscription.id) return { tracked: false, reason: "no_subscription" };
+    if (stripeSubscription.status !== "trialing") return { tracked: false, reason: "not_trialing" };
+
+    const include = [{ model: SubscriptionPlan, as: "plan" }];
+    const localSubscription = await UserSubscription.findOne({
+      where: { stripeSubscriptionId: stripeSubscription.id },
+      include,
+    });
+
+    const userId =
+      (localSubscription && localSubscription.userId) ||
+      Number(stripeSubscription.metadata && stripeSubscription.metadata.userId) ||
+      null;
+    if (!userId) return { tracked: false, reason: "user_not_found" };
+
+    const user = await User.findByPk(userId);
+    if (!user) return { tracked: false, reason: "user_not_found" };
+    if (user.isDummy) return { tracked: false, reason: "dummy" };
+    if (user.role === "admin") return { tracked: false, reason: "admin" };
+
+    const attribution = (await MetaUserAttribution.findOne({ where: { userId: user.id } })) || {};
+    const planName = (localSubscription && localSubscription.plan && localSubscription.plan.name) || "subscription";
+
+    const event = buildEvent({
+      eventName: "StartTrial",
+      eventTime: stripeSubscription.start_date || Math.floor(Date.now() / 1000),
+      eventId: `starttrial_${stripeSubscription.id}`,
+      email: user.email,
+      phone: user.mobile,
+      userId: user.id,
+      attribution: toPlain(attribution),
+      customData: {
+        value: 0,
+        currency: String(stripeSubscription.currency || "").toUpperCase() || "AUD",
+        content_name: planName,
+        user_role: user.role,
+      },
+      defaultTrackingEnabled: config.defaultTrackingEnabled,
+      defaultPhoneCountryCode: config.defaultPhoneCountryCode,
+    });
+
+    return await recordAndSend({ event, userId: user.id, config });
+  } catch (error) {
+    logError("trackStartTrial failed", error);
+    return { tracked: false, reason: "error" };
+  }
+};
+
+/**
  * Re-sends failed events, and pending events older than 5 minutes, that are
  * younger than 6 days and below the 8-attempt cap. Never throws.
  */
@@ -474,6 +533,8 @@ module.exports = {
   trackRegistration,
   trackAttributionOnly,
   trackSubscribeFromInvoice,
+  trackStartTrial,
+  isTrackingEnabled: () => isReady(getConfig()),
   retryPendingEvents,
   flush,
   // Exposed for tests only.

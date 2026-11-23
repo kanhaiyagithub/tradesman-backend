@@ -10,7 +10,7 @@ passport.use(
       clientSecret: process.env.GOOGLE_CLIENT_SECRET, // ✅ from .env
       callbackURL:
         process.env.GOOGLE_CALLBACK_URL ||
-        'http://localhost:5000/api/auth/google/callback',
+        `http://localhost:${process.env.PORT || 5000}/api/auth/google/callback`,
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
@@ -95,8 +95,12 @@ passport.serializeUser((user, done) => {
   done(null, user.id);
 });
 passport.deserializeUser(async (id, done) => {
-  const user = await User.findByPk(id);
-  done(null, user);
+  try {
+    const user = await User.findByPk(id);
+    done(null, user);
+  } catch (error) {
+    done(error);
+  }
 });
 
 module.exports = passport;

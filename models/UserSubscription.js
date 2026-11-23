@@ -53,6 +53,13 @@ const UserSubscription = sequelize.define(
       allowNull: true,
     },
 
+    // Set once, the first time a Stripe subscription of this user had a trial. It is never
+    // cleared, so cancelling and resubscribing cannot earn a second free trial.
+    trialUsedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+
     // =====================
     // 🔥 Stripe lifecycle sync
     // =====================

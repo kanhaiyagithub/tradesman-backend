@@ -11,6 +11,8 @@ const { createAndSendNotification } = require("../services/notificationService")
 const User = require("../models/User");
 const { notifyAdminsTradesmanNeedsVerification } = require("../services/adminNotificationService");
 const { handleTradesmanSubscribed } = require("../services/subscriptionApprovalService");
+
+const STUCK_WEBHOOK_EVENT_MS = 5 * 60 * 1000;
 const { toMajorUnits } = require("../utils/metaCapi");
 const {
   sendSubscriptionWelcomeEmail,
@@ -362,6 +364,9 @@ const syncSubscriptionFromStripe = async (stripeSubscription) => {
   localSubscription.cancelAtPeriodEnd =
     !!stripeSubscription.cancel_at_period_end;
   localSubscription.trialEndsAt = fromUnix(stripeSubscription.trial_end);
+  if (stripeSubscription.trial_end && !localSubscription.trialUsedAt) {
+    localSubscription.trialUsedAt = fromUnix(stripeSubscription.trial_end);
+  }
 
   if (stripeSubscription.status === "canceled") {
     localSubscription.endDate = new Date();
@@ -413,7 +418,15 @@ exports.handleWebhook = async (req, res) => {
         return res.json({ received: true, duplicate: true });
       }
 
-      if (webhookEvent.status === "processing") {
+      // A worker that crashed mid-event leaves it "processing" forever: after a few minutes
+      // the retry from Stripe takes it over instead of being refused.
+      const startedAt = webhookEvent.processingStartedAt
+        ? new Date(webhookEvent.processingStartedAt).getTime()
+        : 0;
+      if (
+        webhookEvent.status === "processing" &&
+        Date.now() - startedAt < STUCK_WEBHOOK_EVENT_MS
+      ) {
         return res.status(409).json({ received: true, processing: true });
       }
 
@@ -458,6 +471,8 @@ exports.handleWebhook = async (req, res) => {
 
       case "customer.subscription.created":
         await syncSubscriptionFromStripe(data);
+        // Never throws; the fixed event id stops a webhook retry from counting twice.
+        await metaConversionService.trackStartTrial(data);
         break;
 
       case "customer.subscription.updated": {

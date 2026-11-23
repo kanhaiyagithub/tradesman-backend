@@ -28,6 +28,12 @@ if (process.env.NODE_ENV === 'production') {
     process.env.GOOGLE_CLIENT_IDS,
   ].some((value) => String(value || '').trim());
 
+  // No localhost fallbacks in production: these URLs end up in Stripe and Google redirects.
+  const missingUrls = ['APP_BASE_URL', 'GOOGLE_CALLBACK_URL'].filter((name) => !process.env[name]);
+  if (missingUrls.length) {
+    throw new Error(`Missing required environment variables: ${missingUrls.join(', ')}`);
+  }
+
   if (!hasGoogleClientId) {
     throw new Error('A Google client ID (GOOGLE_CLIENT_ID / GOOGLE_MOBILE_CLIENT_ID) is required in production.');
   }

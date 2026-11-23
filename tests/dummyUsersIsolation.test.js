@@ -195,7 +195,7 @@ test("a user from the other world is simply 'not found' by id and by profile", a
     assert.equal((await call("GET", `${route}/${dummyTradesman.id}`, { as: dummyClient.token })).status, 200, `${route} same world (test)`);
     assert.equal((await call("GET", `${route}/${dummyTradesman.id}`, { as: realClient.token })).status, 404, `${route} real -> test`);
     assert.equal((await call("GET", `${route}/${realTradesman.id}`, { as: dummyClient.token })).status, 404, `${route} test -> real`);
-    assert.equal((await call("GET", `${route}/${dummyTradesman.id}`)).status, 404, `${route} anonymous -> test`);
+    assert.equal((await call("GET", `${route}/${dummyTradesman.id}`)).status, route === "/api/users/profile" ? 401 : 404, `${route} anonymous -> test`);
   }
 });
 

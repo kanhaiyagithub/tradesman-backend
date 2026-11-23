@@ -452,3 +452,32 @@ test("saveAttribution does not overwrite known values with empty ones", async ()
   assert.equal(merged.anonId, "keep-me-1234");
   assert.equal(merged.carrier, "Telstra");
 });
+
+test("StartTrial is sent once when a subscription starts trialing", async () => {
+  mockSubscriptionUser();
+  const trial = { id: "sub_1", status: "trialing", currency: "aud", start_date: 1700000000 };
+
+  const first = await service.trackStartTrial(trial);
+  await service.flush();
+  assert.equal(first.tracked, true);
+
+  const event = fetchCalls[0].body.data[0];
+  assert.equal(event.event_name, "StartTrial");
+  assert.equal(event.event_id, "starttrial_sub_1");
+  assert.equal(event.custom_data.value, 0);
+
+  // A webhook retry must not count it twice.
+  assert.equal((await service.trackStartTrial(trial)).reason, "duplicate");
+  assert.equal((await service.trackStartTrial({ ...trial, id: "sub_2", status: "active" })).reason, "not_trialing");
+});
+
+test("tracking stays off when no dataset id is configured", async () => {
+  delete process.env.META_DATASET_ID;
+  assert.equal(service.isTrackingEnabled(), false);
+  assert.equal((await register()).tracked, false);
+});
+
+test("consent is assumed off when the app does not report it", async () => {
+  delete process.env.META_DEFAULT_TRACKING_ENABLED;
+  assert.equal(service.getConfig().defaultTrackingEnabled, false);
+});

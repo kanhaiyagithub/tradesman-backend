@@ -27,6 +27,7 @@ notificationService.createAndSendNotification = async (...args) => {
 const User = require("../models/User");
 const Review = require("../models/reviewModel");
 const Hire = require("../models/hireModel");
+const sequelize = require("../config/db");
 const TravelPlan = require("../models/locationModel");
 const UserSubscription = require("../models/UserSubscription");
 const userController = require("../controllers/userController");
@@ -59,6 +60,7 @@ const saved = {
   hireFindAll: Hire.findAll,
   hireFindOne: Hire.findOne,
   hireCreate: Hire.create,
+  sequelizeTransaction: sequelize.transaction,
   planFindAll: TravelPlan.findAll,
   planFindOne: TravelPlan.findOne,
   planUpdate: TravelPlan.update,
@@ -85,6 +87,7 @@ test.afterEach(() => {
   Hire.findAll = saved.hireFindAll;
   Hire.findOne = saved.hireFindOne;
   Hire.create = saved.hireCreate;
+  sequelize.transaction = saved.sequelizeTransaction;
   sentNotifications.length = 0;
   TravelPlan.findAll = saved.planFindAll;
   TravelPlan.findOne = saved.planFindOne;
@@ -718,6 +721,8 @@ const stubHireRequest = () => {
   const created = [];
   User.findOne = async () => ({ id: 5, role: "tradesman" });
   Hire.findOne = async () => null;
+  // requestHire runs its check + insert in a transaction; no database in this unit test.
+  sequelize.transaction = async (work) => work({ LOCK: { UPDATE: "UPDATE" } });
   User.findByPk = async () => ({ name: "Cara Client" });
   Hire.create = async (values) => {
     created.push(values);
