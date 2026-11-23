@@ -1,5 +1,6 @@
 const {
   saveDeviceToken,
+  deleteDeviceTokenForUser,
   normalizeDeviceToken,
 } = require("../models/deviceTokenModel");
 const {
@@ -81,6 +82,45 @@ const saveMyDeviceToken = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to save device token",
+    });
+  }
+};
+
+/**
+ * Removes the current device token for the authenticated user (called at logout
+ * so a logged-out phone stops receiving this account's push notifications).
+ * Idempotent: succeeds even when the token is already gone.
+ *
+ * @route POST /api/notifications/remove-token
+ * @access Private
+ */
+const removeMyDeviceToken = async (req, res) => {
+  try {
+    const normalizedToken = normalizeDeviceToken(req.body?.token);
+
+    if (!normalizedToken) {
+      return res.status(400).json({
+        success: false,
+        message: "Token is required",
+      });
+    }
+
+    await deleteDeviceTokenForUser(req.user.id, normalizedToken);
+
+    return res.json({
+      success: true,
+      message: "Device token removed successfully",
+    });
+  } catch (error) {
+    console.error("[TOKEN REMOVE ERROR]", {
+      error: error.message,
+      stack: error.stack,
+      at: new Date().toISOString(),
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to remove device token",
     });
   }
 };
@@ -239,5 +279,6 @@ module.exports = {
   markAllMyNotificationsAsRead,
   markMyNotificationAsRead,
   saveMyDeviceToken,
+  removeMyDeviceToken,
   sendPushNotification,
 };

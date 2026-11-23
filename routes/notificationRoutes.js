@@ -7,6 +7,7 @@ const {
   markAllMyNotificationsAsRead,
   markMyNotificationAsRead,
   saveMyDeviceToken,
+  removeMyDeviceToken,
 } = require("../controllers/notificationController");
 
 /**
@@ -16,6 +17,14 @@ const {
  * @access Private
  */
 router.post("/save-token", verifyToken, saveMyDeviceToken);
+
+/**
+ * Remove the authenticated user's Firebase device token (called at logout).
+ *
+ * @route POST /api/notifications/remove-token
+ * @access Private
+ */
+router.post("/remove-token", verifyToken, removeMyDeviceToken);
 
 /**
  * Fetch the authenticated user's notification inbox.

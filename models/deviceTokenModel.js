@@ -121,10 +121,31 @@ const deleteDeviceTokens = async (tokens) => {
   });
 };
 
+/**
+ * Deletes a device token only when it belongs to the given user.
+ * Used at logout, so one user can never remove another user's token.
+ *
+ * @param {number} userId - Authenticated user ID.
+ * @param {string} token - Firebase device token.
+ * @returns {Promise<number>} Number of deleted rows (0 when nothing matched).
+ */
+const deleteDeviceTokenForUser = async (userId, token) => {
+  const normalizedToken = normalizeDeviceToken(token);
+
+  if (!userId || !normalizedToken) {
+    return 0;
+  }
+
+  return DeviceToken.destroy({
+    where: { user_id: userId, token: normalizedToken },
+  });
+};
+
 module.exports = {
   DeviceToken,
   normalizeDeviceToken,
   saveDeviceToken,
   getTokensByUser,
   deleteDeviceTokens,
+  deleteDeviceTokenForUser,
 };
