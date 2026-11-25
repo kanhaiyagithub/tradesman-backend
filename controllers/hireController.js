@@ -5,6 +5,7 @@ const { Op } = require("sequelize");
 const sequelize = require("../config/db");
 const { sendPushNotification } = require("./notificationController");
 const { getRequesterWorld, worldWhere } = require("../services/dummyWorld");
+const storageService = require("../services/storage/storageService");
 
 const ACTIVE_HIRE_STATUSES = ["pending", "accepted"];
 const TERMINAL_HIRE_STATUSES = ["rejected", "completed", "cancelled"];
@@ -45,6 +46,20 @@ const getParticipantRole = (hire, userId) => {
   }
 
   return null;
+};
+
+// The app shows the client's photo in the tradesman's job list, so the stored
+// value has to leave as a link.
+const toJobPayload = (job) => {
+  const data = job.toJSON();
+
+  if (data.client) {
+    data.client.profileImage = storageService.toPublicUrl(data.client.profileImage, {
+      category: "profile",
+    });
+  }
+
+  return data;
 };
 
 const notifyUser = (userId, title, body, data) => {
@@ -526,13 +541,13 @@ exports.getMyJobs = async (req, res) => {
     const jobs = await Hire.findAll({
       where,
       include: [
-        { model: User, as: "client", attributes: ["id", "name"] },
+        { model: User, as: "client", attributes: ["id", "name", "profileImage"] },
         { model: User, as: "tradesman", attributes: ["id", "name"] },
       ],
       order: [["createdAt", "DESC"]],
     });
 
-    return sendResponse(res, 200, true, "Jobs fetched", jobs);
+    return sendResponse(res, 200, true, "Jobs fetched", jobs.map(toJobPayload));
   } catch (err) {
     console.error("getMyJobs:", err);
     return sendResponse(res, 500, false, "Server error");
